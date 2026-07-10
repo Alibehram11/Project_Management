@@ -53,6 +53,9 @@ Demo hesapları:
 - SQLite veritabanına state, snapshot ve log kaydı
 - Admin için sistem logları ve müdahale araçları
 - JSON yedek indirme, veritabanından geri yükleme ve veri onarma
+- Siyah-beyaz, hareketli ve tıklanabilir yeni verimlilik paneli
+- Proje içinde Atölye sekmesi
+- `Alibehram11/Atolye` kaynaklarının `integrations/atolye` altında saklanması
 
 Not: Bitrix24 gibi kapsamlı iş yönetimi araçlarından esinlenen CRM, akış ve
 raporlama modülleri eklendi; marka, arayüz ve ürün birebir kopyalanmaz.
@@ -70,6 +73,17 @@ yazar.
 - ClickUp: görev, doküman, dashboard, yorum/chat, otomasyon ve zaman takibi
   yaklaşımından esinlenildi.
 
+## Atölye entegrasyonu
+
+`integrations/atolye` klasörü `Alibehram11/Atolye` reposundan alınan Flask tabanlı
+robotik atölye envanter uygulamasını içerir. Ana uygulamada bunun hafif,
+kullanıcı hesabıyla girilen ve proje paneliyle uyumlu bir ekranı vardır:
+
+- Proje içindeki `Atölye` sekmesi
+- Envanter stokları
+- Parça talep formu
+- Adminler için talep onaylama/reddetme
+
 ## Test
 
 Backend kontrolü:
@@ -78,8 +92,14 @@ Backend kontrolü:
 python server.py --check
 ```
 
+Atölye kaynak kontrolü:
+
+```powershell
+python -m py_compile integrations/atolye/app.py integrations/atolye/models.py integrations/atolye/create_sample_excel.py
+```
+
 Tarayıcıda `index.html?selftest=1` açılırsa gizli self-test çalışır. Bu test
 admin görev atama, her üyeye görev atama, üye ekleme, kaptan yetkisi, normal üye
 paneli, takvim, belge cevap kaydı, belge soru düzenleme, checklist, yorum,
 benim işlerim, gelen kutusu, metrik tutarlılığı ve hatalı/boş veri akışlarını
-kontrol eder. Son doğrulamada 78 tutarlılık kontrolü geçti.
+kontrol eder. Son doğrulamada 83 tutarlılık kontrolü geçti.

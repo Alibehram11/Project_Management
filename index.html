@@ -145,6 +145,7 @@
           <button class="nav-link" data-view="team" type="button">Ekip</button>
           <button class="nav-link" data-view="docs" type="button">Belgeler</button>
           <button class="nav-link" data-view="calendar" type="button">Takvim</button>
+          <button class="nav-link" data-view="atolye" type="button">Atölye</button>
           <details class="nav-tools" open>
             <summary>Diğer araçlar</summary>
             <button class="nav-link" data-view="crm" type="button">CRM</button>
@@ -272,6 +273,45 @@
         </section>
 
         <section id="dashboardView" class="view-grid hidden">
+          <section id="performanceOverview" class="performance-layout wide-dashboard">
+            <article class="productivity-card">
+              <div class="panel-header">
+                <h3>Verimlilik</h3>
+                <button id="productivityHelpButton" class="ghost-action small" type="button">Nasıl çalışır?</button>
+              </div>
+              <div class="productivity-ring" style="--progress: 0">
+                <div>
+                  <strong id="productivityScore">0</strong>
+                  <span>%</span>
+                </div>
+              </div>
+            </article>
+
+            <div class="metric-mosaic">
+              <article class="mosaic-card mosaic-large" data-jump-view="tasks">
+                <span>Devam eden toplam görev</span>
+                <strong id="ongoingTaskTotal">0</strong>
+              </article>
+              <article class="mosaic-card" data-jump-view="tasks">
+                <span>Görevler tamamlandı</span>
+                <strong id="doneTaskTotal">0</strong>
+              </article>
+              <article class="mosaic-card alert" data-jump-view="inbox">
+                <span>İtiraz edilen görevler</span>
+                <strong id="changeTaskTotal">0</strong>
+                <small>Ayrıntılar</small>
+              </article>
+            </div>
+
+            <article class="activity-panel">
+              <div class="panel-header">
+                <h3>Günlük etkinlik</h3>
+                <span id="dailyActivityCount" class="soft-pill">0 kayıt</span>
+              </div>
+              <div id="dailyActivityList" class="activity-list"></div>
+            </article>
+          </section>
+
           <article class="metric-card">
             <span>Açık görev</span>
             <strong id="openTasks">0</strong>
@@ -380,6 +420,16 @@
             <h3>Proje takvimi</h3>
           </div>
           <div id="calendarList" class="calendar-list"></div>
+        </section>
+
+        <section id="atolyeView" class="view-stack hidden">
+          <section class="panel">
+            <div class="panel-header">
+              <h3>Atölye</h3>
+              <span class="soft-pill">Hesap içi modül</span>
+            </div>
+            <div id="workspaceAtolyeContent" class="atolye-layout"></div>
+          </section>
         </section>
 
         <section id="crmView" class="view-stack hidden">

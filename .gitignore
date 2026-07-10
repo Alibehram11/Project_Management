@@ -207,6 +207,8 @@ tempCodeRunnerFile.py
 app_data.sqlite3
 uploaded_templates/
 self-test-result.png
+atolye-test-result.png
+.atolye-source/
 
 # Ruff stuff:
 .ruff_cache/

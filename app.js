@@ -122,6 +122,44 @@ const documentTemplates = [
   },
 ];
 
+const ATOLYE_PRODUCTS = [
+  {
+    id: "arduino-uno",
+    name: "Arduino Uno",
+    description: "Mikrodenetleyici kartı",
+    quantity: 10,
+    category: "Elektronik",
+  },
+  {
+    id: "raspberry-pi",
+    name: "Raspberry Pi",
+    description: "Tek kartlı bilgisayar",
+    quantity: 5,
+    category: "Bilgisayar",
+  },
+  {
+    id: "servo-motor",
+    name: "Servo Motor",
+    description: "Döner motor",
+    quantity: 20,
+    category: "Motor",
+  },
+  {
+    id: "led",
+    name: "LED",
+    description: "Işık yayan diyot",
+    quantity: 100,
+    category: "Işık",
+  },
+  {
+    id: "breadboard",
+    name: "Breadboard",
+    description: "Devre tahtası",
+    quantity: 15,
+    category: "Araç",
+  },
+];
+
 const ALLOWED_PRIORITIES = new Set(["low", "normal", "high", "urgent"]);
 const ALLOWED_ROLES = new Set(["member", "lead", "admin"]);
 const ALLOWED_TEAMS = new Set(["Yazılım", "Tasarım", "Mekanik", "Elektronik", "Yönetim"]);
@@ -160,6 +198,8 @@ const inboxView = document.querySelector("#inboxView");
 const teamView = document.querySelector("#teamView");
 const docsView = document.querySelector("#docsView");
 const calendarView = document.querySelector("#calendarView");
+const atolyeView = document.querySelector("#atolyeView");
+const workspaceAtolyeContent = document.querySelector("#workspaceAtolyeContent");
 const crmView = document.querySelector("#crmView");
 const feedView = document.querySelector("#feedView");
 const reportsView = document.querySelector("#reportsView");
@@ -314,6 +354,18 @@ function createSeedData() {
       },
     ],
     documents: {},
+    atolyeRequests: [
+      {
+        id: uid(),
+        studentName: "Demo Öğrenci",
+        studentId: "AT-001",
+        projectPurpose: "Robot kol prototipi",
+        usageReason: "Servo motor hareket testi",
+        status: "Beklemede",
+        createdAt: new Date().toISOString(),
+        items: [{ productId: "servo-motor", quantity: 2 }],
+      },
+    ],
     documentTemplates: documentTemplates.map((template) => ({
       ...template,
       questions: [...template.questions],
@@ -391,6 +443,7 @@ function normalizeState(value) {
     invites: Array.isArray(value.invites) ? value.invites : [],
     tasks: Array.isArray(value.tasks) ? value.tasks : seed.tasks,
     documents: value.documents && typeof value.documents === "object" ? value.documents : {},
+    atolyeRequests: Array.isArray(value.atolyeRequests) ? value.atolyeRequests : seed.atolyeRequests,
     calendarEvents: Array.isArray(value.calendarEvents) ? value.calendarEvents : [],
     crmItems: Array.isArray(value.crmItems) ? value.crmItems : seed.crmItems,
     feedItems: Array.isArray(value.feedItems) ? value.feedItems : seed.feedItems,
@@ -431,6 +484,18 @@ function normalizeState(value) {
   });
 
   normalized.documentTemplates = mergeTemplates(normalized.documentTemplates);
+  normalized.atolyeRequests = normalized.atolyeRequests.map((request) => ({
+    id: request.id || uid(),
+    studentName: request.studentName || "İsimsiz",
+    studentId: request.studentId || "",
+    projectPurpose: request.projectPurpose || "",
+    usageReason: request.usageReason || "",
+    status: ["Beklemede", "Onaylandı", "Reddedildi"].includes(request.status)
+      ? request.status
+      : "Beklemede",
+    createdAt: request.createdAt || new Date().toISOString(),
+    items: Array.isArray(request.items) ? request.items : [],
+  }));
   localStorage.setItem(STORAGE_KEY, JSON.stringify(normalized));
   return normalized;
 }
@@ -754,6 +819,7 @@ function render() {
   renderTeam();
   renderDocuments();
   renderCalendar();
+  renderAtolye(workspaceAtolyeContent, { publicMode: false });
   renderBusinessModules();
   renderDialogs();
 }
@@ -892,6 +958,7 @@ function normalizeActiveView() {
     "team",
     "docs",
     "calendar",
+    "atolye",
     "crm",
     "feed",
     "reports",
@@ -919,6 +986,7 @@ function renderActiveView() {
   teamView.classList.toggle("hidden", view !== "team");
   docsView.classList.toggle("hidden", view !== "docs");
   calendarView.classList.toggle("hidden", view !== "calendar");
+  atolyeView.classList.toggle("hidden", view !== "atolye");
   crmView.classList.toggle("hidden", view !== "crm");
   feedView.classList.toggle("hidden", view !== "feed");
   reportsView.classList.toggle("hidden", view !== "reports");
@@ -1139,11 +1207,20 @@ function renderDashboard() {
   const tasks = projectTasks();
   const approved = tasks.filter((task) => task.status === "approved");
   const review = tasks.filter((task) => task.status === "review");
+  const changes = tasks.filter((task) => task.status === "changes");
+  const ongoing = tasks.filter((task) => task.status !== "approved");
+  const productivity = tasks.length === 0 ? 100 : Math.round((approved.length / tasks.length) * 100);
 
-  document.querySelector("#openTasks").textContent = tasks.filter((task) => task.status !== "approved").length;
+  document.querySelector("#openTasks").textContent = ongoing.length;
   document.querySelector("#reviewTasks").textContent = review.length;
   document.querySelector("#approvedTasks").textContent = approved.length;
   document.querySelector("#calendarCount").textContent = projectEvents().length;
+  document.querySelector("#productivityScore").textContent = productivity;
+  document.querySelector(".productivity-ring")?.style.setProperty("--progress", productivity);
+  document.querySelector("#ongoingTaskTotal").textContent = ongoing.length;
+  document.querySelector("#doneTaskTotal").textContent = approved.length;
+  document.querySelector("#changeTaskTotal").textContent = changes.length;
+  renderDailyActivity(tasks);
 
   const recent = tasks
     .flatMap((task) =>
@@ -1180,6 +1257,60 @@ function renderDashboard() {
   }
 
   renderTeamList(document.querySelector("#teamPreview"), { compact: true });
+}
+
+function renderDailyActivity(tasks) {
+  const list = document.querySelector("#dailyActivityList");
+  const label = document.querySelector("#dailyActivityCount");
+  if (!list || !label) {
+    return;
+  }
+
+  const today = new Date().toISOString().slice(0, 10);
+  const activities = [
+    ...tasks.flatMap((task) =>
+      task.submissions.map((submission) => ({
+        time: submission.submittedAt,
+        title: task.title,
+        text: `${userName(submission.userId)} teslim yükledi`,
+      })),
+    ),
+    ...tasks.flatMap((task) =>
+      task.comments.map((comment) => ({
+        time: comment.createdAt,
+        title: task.title,
+        text: `${userName(comment.userId)} yorum yazdı`,
+      })),
+    ),
+    ...projectEvents().map((event) => ({
+      time: event.date,
+      title: event.title,
+      text: `${event.type} takvim kaydı`,
+    })),
+  ]
+    .filter((activity) => String(activity.time || "").slice(0, 10) === today)
+    .sort((a, b) => new Date(b.time) - new Date(a.time));
+
+  label.textContent = `${activities.length} kayıt`;
+  list.innerHTML = "";
+  if (activities.length === 0) {
+    list.append(emptyState("Veri yok"));
+    return;
+  }
+
+  activities.slice(0, 6).forEach((activity) => {
+    const item = document.createElement("article");
+    item.className = "activity-item";
+    item.innerHTML = `
+      <span></span>
+      <strong></strong>
+      <p></p>
+    `;
+    item.querySelector("span").textContent = formatDateTime(activity.time);
+    item.querySelector("strong").textContent = activity.title;
+    item.querySelector("p").textContent = activity.text;
+    list.append(item);
+  });
 }
 
 function renderTasks() {
@@ -1913,6 +2044,251 @@ function renderCalendar() {
   });
 }
 
+function productStock(productId) {
+  const product = ATOLYE_PRODUCTS.find((item) => item.id === productId);
+  const used = state.atolyeRequests
+    .filter((request) => request.status === "Onaylandı")
+    .flatMap((request) => request.items)
+    .filter((item) => item.productId === productId)
+    .reduce((total, item) => total + Number(item.quantity || 0), 0);
+  return Math.max(0, Number(product?.quantity || 0) - used);
+}
+
+function renderAtolye(container, options = {}) {
+  if (!container) {
+    return;
+  }
+  const pending = state.atolyeRequests.filter((request) => request.status === "Beklemede");
+  const approved = state.atolyeRequests.filter((request) => request.status === "Onaylandı");
+  const rejected = state.atolyeRequests.filter((request) => request.status === "Reddedildi");
+  const lowStock = ATOLYE_PRODUCTS.filter((product) => productStock(product.id) <= Math.max(2, product.quantity * 0.2));
+  const canModerate = Boolean(currentUser() && isProjectManager());
+
+  container.innerHTML = `
+    <section class="atolye-hero">
+      <div>
+        <p class="eyebrow">Alibehram11/Atolye entegrasyonu</p>
+        <h2>Robotik atölye stok ve parça talepleri</h2>
+        <p>Arduino, motor, sensör ve ortak ekipman talepleri kullanıcı hesabıyla proje içinden izlenir.</p>
+      </div>
+      <div class="atolye-source-card">
+        <span>Kaynak repo</span>
+        <strong>Atolye</strong>
+        <a href="https://github.com/Alibehram11/Atolye" target="_blank" rel="noreferrer">GitHub</a>
+      </div>
+    </section>
+
+    <section class="atolye-stat-grid">
+      <article><span>Bekleyen talep</span><strong>${pending.length}</strong></article>
+      <article><span>Onaylanan</span><strong>${approved.length}</strong></article>
+      <article><span>Reddedilen</span><strong>${rejected.length}</strong></article>
+      <article><span>Düşük stok</span><strong>${lowStock.length}</strong></article>
+    </section>
+
+    <section class="atolye-content-grid">
+      <article class="atolye-panel">
+        <div class="panel-header">
+          <h3>Envanter</h3>
+          <span class="soft-pill">${ATOLYE_PRODUCTS.length} ürün</span>
+        </div>
+        <div class="inventory-list"></div>
+      </article>
+      <article class="atolye-panel">
+        <div class="panel-header">
+          <h3>Parça talebi</h3>
+          <span class="soft-pill">Hesapla erişilir</span>
+        </div>
+        <form class="atolye-request-form">
+          <label>
+            Ad soyad
+            <input name="studentName" type="text" required />
+          </label>
+          <label>
+            Öğrenci no / ekip kodu
+            <input name="studentId" type="text" required />
+          </label>
+          <label>
+            Ürün
+            <select name="productId" required></select>
+          </label>
+          <label>
+            Adet
+            <input name="quantity" type="number" min="1" value="1" required />
+          </label>
+          <label>
+            Proje amacı
+            <textarea name="projectPurpose" rows="3" required></textarea>
+          </label>
+          <label>
+            Kullanım nedeni
+            <textarea name="usageReason" rows="3" required></textarea>
+          </label>
+          <button class="primary-action" type="submit">Talep gönder</button>
+          <p class="helper-text" role="status"></p>
+        </form>
+      </article>
+    </section>
+
+    <section class="atolye-panel">
+      <div class="panel-header">
+        <h3>Talep akışı</h3>
+        <span class="soft-pill">${state.atolyeRequests.length} kayıt</span>
+      </div>
+      <div class="atolye-request-list"></div>
+    </section>
+  `;
+
+  const inventoryList = container.querySelector(".inventory-list");
+  ATOLYE_PRODUCTS.forEach((product) => {
+    const stock = productStock(product.id);
+    const item = document.createElement("article");
+    item.className = "inventory-item";
+    item.innerHTML = `
+      <div>
+        <strong></strong>
+        <span></span>
+      </div>
+      <small></small>
+    `;
+    item.querySelector("strong").textContent = product.name;
+    item.querySelector("span").textContent = `${product.category} · ${product.description}`;
+    item.querySelector("small").textContent = `${stock}/${product.quantity}`;
+    item.dataset.low = stock <= Math.max(2, product.quantity * 0.2) ? "true" : "false";
+    inventoryList.append(item);
+  });
+
+  const select = container.querySelector("select[name='productId']");
+  ATOLYE_PRODUCTS.forEach((product) => {
+    const option = document.createElement("option");
+    option.value = product.id;
+    option.textContent = `${product.name} (${productStock(product.id)} stok)`;
+    option.disabled = productStock(product.id) === 0;
+    select.append(option);
+  });
+
+  const form = container.querySelector(".atolye-request-form");
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const data = new FormData(form);
+    const result = createAtolyeRequest({
+      studentName: data.get("studentName"),
+      studentId: data.get("studentId"),
+      productId: data.get("productId"),
+      quantity: data.get("quantity"),
+      projectPurpose: data.get("projectPurpose"),
+      usageReason: data.get("usageReason"),
+    });
+    const message = form.querySelector(".helper-text");
+    message.textContent = result ? "Talep kaydedildi." : "Talep kaydedilemedi. Stok ve alanları kontrol et.";
+    message.dataset.type = result ? "success" : "error";
+    if (result) {
+      form.reset();
+      renderAtolye(container, options);
+    }
+  });
+
+  const requestList = container.querySelector(".atolye-request-list");
+  if (state.atolyeRequests.length === 0) {
+    requestList.append(emptyState("Henüz talep yok."));
+    return;
+  }
+  state.atolyeRequests
+    .slice()
+    .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
+    .forEach((request) => {
+      const productText = request.items
+        .map((item) => {
+          const product = ATOLYE_PRODUCTS.find((entry) => entry.id === item.productId);
+          return `${product?.name || "Ürün"} x ${item.quantity}`;
+        })
+        .join(", ");
+      const item = document.createElement("article");
+      item.className = "atolye-request-item";
+      item.innerHTML = `
+        <div>
+          <strong></strong>
+          <span></span>
+          <p></p>
+        </div>
+        <div class="row-actions"></div>
+      `;
+      item.querySelector("strong").textContent = `${request.studentName} · ${request.status}`;
+      item.querySelector("span").textContent = `${productText} · ${formatDateTime(request.createdAt)}`;
+      item.querySelector("p").textContent = `${request.projectPurpose} - ${request.usageReason}`;
+      const actions = item.querySelector(".row-actions");
+      if (canModerate && request.status === "Beklemede") {
+        const approve = document.createElement("button");
+        approve.className = "primary-action small";
+        approve.type = "button";
+        approve.textContent = "Onayla";
+        approve.addEventListener("click", () => updateAtolyeRequestStatus(request.id, "Onaylandı"));
+        const reject = document.createElement("button");
+        reject.className = "secondary-action small danger-action";
+        reject.type = "button";
+        reject.textContent = "Reddet";
+        reject.addEventListener("click", () => updateAtolyeRequestStatus(request.id, "Reddedildi"));
+        actions.append(approve, reject);
+      } else {
+        const status = document.createElement("span");
+        status.className = "soft-pill";
+        status.textContent = request.status;
+        actions.append(status);
+      }
+      requestList.append(item);
+    });
+}
+
+function createAtolyeRequest(input) {
+  const product = ATOLYE_PRODUCTS.find((item) => item.id === input.productId);
+  const quantity = Number(input.quantity || 0);
+  if (
+    !product ||
+    quantity < 1 ||
+    quantity > productStock(product.id) ||
+    !String(input.studentName || "").trim() ||
+    !String(input.studentId || "").trim() ||
+    !String(input.projectPurpose || "").trim() ||
+    !String(input.usageReason || "").trim()
+  ) {
+    return false;
+  }
+
+  state.atolyeRequests.push({
+    id: uid(),
+    studentName: String(input.studentName).trim(),
+    studentId: String(input.studentId).trim(),
+    projectPurpose: String(input.projectPurpose).trim(),
+    usageReason: String(input.usageReason).trim(),
+    status: "Beklemede",
+    createdAt: new Date().toISOString(),
+    items: [{ productId: product.id, quantity }],
+  });
+  saveState();
+  logAction("atolye.request.created", { productId: product.id, quantity });
+  return true;
+}
+
+function updateAtolyeRequestStatus(requestId, status) {
+  if (!isProjectManager() || !["Onaylandı", "Reddedildi"].includes(status)) {
+    return false;
+  }
+  const request = state.atolyeRequests.find((item) => item.id === requestId);
+  if (!request || request.status !== "Beklemede") {
+    return false;
+  }
+  if (
+    status === "Onaylandı" &&
+    request.items.some((item) => Number(item.quantity || 0) > productStock(item.productId))
+  ) {
+    return false;
+  }
+  request.status = status;
+  saveState();
+  logAction("atolye.request.status", { requestId, status });
+  renderAtolye(workspaceAtolyeContent, { publicMode: false });
+  return true;
+}
+
 function renderBusinessModules() {
   renderCrm();
   renderFeed();
@@ -2601,6 +2977,21 @@ navLinks.forEach((link) => {
   });
 });
 
+document.querySelector("#performanceOverview")?.addEventListener("click", (event) => {
+  const card = event.target.closest("[data-jump-view]");
+  if (!card) {
+    return;
+  }
+  session.view = card.dataset.jumpView;
+  saveSession();
+  render();
+});
+
+document.querySelector("#productivityHelpButton")?.addEventListener("click", () => {
+  const score = document.querySelector("#productivityScore")?.textContent || "0";
+  alert(`Verimlilik, onaylanan görevlerin toplam görevlere oranıdır. Şu an: %${score}`);
+});
+
 document.querySelectorAll("[data-close-dialog]").forEach((button) => {
   button.addEventListener("click", () => {
     button.closest("dialog")?.close();
@@ -3063,6 +3454,27 @@ function runSelfTest() {
       description: "Test",
     });
     check(projectEvents().length === invalidEventBefore + 1, "Admin takvim kaydi olusturabiliyor");
+
+    session.view = "atolye";
+    saveSession();
+    render();
+    check(visible(atolyeView), "Atolye sekmesi kullanici hesabiyla proje icinden aciliyor");
+    const requestBefore = state.atolyeRequests.length;
+    check(
+      createAtolyeRequest({
+        studentName: "Self Test",
+        studentId: "ST-01",
+        productId: "arduino-uno",
+        quantity: 1,
+        projectPurpose: "Atolye entegrasyon testi",
+        usageReason: "Stok talep akisi",
+      }) === true,
+      "Atolye parcasi icin talep olusturulabiliyor",
+    );
+    check(state.atolyeRequests.length === requestBefore + 1, "Atolye talebi state icinde tutuluyor");
+    const selfTestRequest = state.atolyeRequests.at(-1);
+    check(updateAtolyeRequestStatus(selfTestRequest.id, "Onaylandı") === true, "Admin atolye talebini onaylayabiliyor");
+    check(selfTestRequest.status === "Onaylandı", "Atolye talep durumu onaylandi olarak guncelleniyor");
 
     const template = state.documentTemplates[0];
     check(saveTemplateQuestions(template.id, "") === false, "Bos belge sorusu kaydi reddediliyor");
