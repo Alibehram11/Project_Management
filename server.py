@@ -23,6 +23,10 @@ UPLOAD_DIR = ROOT / "uploaded_templates"
 STATE_KEY = "main"
 MAX_UPLOAD_BYTES = 12 * 1024 * 1024
 CSRF_TOKEN = secrets.token_urlsafe(32)
+JSON_MIME = "application/json; charset=utf-8"
+DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+BLOCKED_STATIC_PATHS = {"/app_data.sqlite3", "/server.py", "/wsgi.py"}
+_WSGI_READY = False
 
 KNOWN_TEMPLATES = {
     "fr01": "01_FR-01_Proje_Tanim_Karti.docx",
@@ -115,7 +119,7 @@ def db_log(actor: str, action: str, detail: object | None = None) -> None:
 def json_response(handler: SimpleHTTPRequestHandler, payload: object, status: int = 200) -> None:
     data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     handler.send_response(status)
-    handler.send_header("Content-Type", "application/json; charset=utf-8")
+    handler.send_header("Content-Type", JSON_MIME)
     handler.send_header("Content-Length", str(len(data)))
     handler.end_headers()
     handler.wfile.write(data)
@@ -251,35 +255,51 @@ def sanitize_state_payload(payload: object) -> object:
     return clean
 
 
+def same_host_origins(host: str) -> set[str]:
+    return {f"http://{host}", f"https://{host}"} if host else set()
+
+
 def allowed_origin(handler: SimpleHTTPRequestHandler) -> str | None:
+    origin = handler.headers.get("Origin")
     host = handler.headers.get("Host", "")
-    return f"http://{host}" if host else None
+    return origin if origin in same_host_origins(host) else None
 
 
 def request_origin_is_allowed(handler: SimpleHTTPRequestHandler) -> bool:
     origin = handler.headers.get("Origin")
     if not origin:
         return True
-    return origin == allowed_origin(handler)
+    return bool(allowed_origin(handler))
 
 
 def csrf_is_valid(handler: SimpleHTTPRequestHandler) -> bool:
     return handler.headers.get("X-CSRF-Token") == CSRF_TOKEN
 
 
+def static_file_path(request_path: str) -> Path | None:
+    path = urlparse(request_path).path
+    if path in BLOCKED_STATIC_PATHS or path.startswith("/uploaded_templates/"):
+        return None
+    clean = unquote(path).lstrip("/")
+    if not clean:
+        clean = "index.html"
+    candidate = (ROOT / clean).resolve()
+    if candidate != ROOT and ROOT not in candidate.parents:
+        return None
+    if candidate.is_dir():
+        candidate = candidate / "index.html"
+    return candidate
+
+
 class Handler(SimpleHTTPRequestHandler):
     server_version = "ProjeYonetimiLocal/1.0"
 
     def translate_path(self, path: str) -> str:
-        parsed = urlparse(path)
-        clean = unquote(parsed.path).lstrip("/")
-        if not clean:
-            clean = "index.html"
-        return str((ROOT / clean).resolve())
+        return str(static_file_path(path) or (ROOT / "index.html"))
 
     def end_headers(self) -> None:
-        origin = self.headers.get("Origin")
-        if origin and origin == allowed_origin(self):
+        origin = allowed_origin(self)
+        if origin:
             self.send_header("Access-Control-Allow-Origin", origin)
             self.send_header("Vary", "Origin")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
@@ -295,10 +315,6 @@ class Handler(SimpleHTTPRequestHandler):
 
     def do_GET(self) -> None:
         path = urlparse(self.path).path
-        blocked = {"/app_data.sqlite3", "/server.py"}
-        if path in blocked or path.startswith("/uploaded_templates/"):
-            json_response(self, {"ok": False, "error": "blocked"}, 403)
-            return
         if path == "/api/health":
             json_response(self, {"ok": True, "database": DB_PATH.name, "templateCount": len(KNOWN_TEMPLATES), "csrfToken": CSRF_TOKEN})
             return
@@ -321,6 +337,9 @@ class Handler(SimpleHTTPRequestHandler):
             with sqlite3.connect(DB_PATH) as conn:
                 rows = conn.execute("SELECT id, ts, actor FROM snapshots ORDER BY id DESC LIMIT 50").fetchall()
             json_response(self, {"ok": True, "snapshots": [{"id": row[0], "ts": row[1], "actor": row[2]} for row in rows]})
+            return
+        if not static_file_path(self.path):
+            json_response(self, {"ok": False, "error": "blocked"}, 403)
             return
         return super().do_GET()
 
@@ -414,7 +433,7 @@ class Handler(SimpleHTTPRequestHandler):
                 file_name = f"{payload.get('projectName', 'proje')}-{payload.get('title', 'belge')}.docx"
                 safe_name = "".join("-" if char in '\\/:*?"<>|' else char for char in file_name)
                 self.send_response(200)
-                self.send_header("Content-Type", "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+                self.send_header("Content-Type", DOCX_MIME)
                 self.send_header("Content-Disposition", f'attachment; filename="{safe_name.encode("ascii", "ignore").decode("ascii") or "belge.docx"}"')
                 self.send_header("Content-Length", str(len(data)))
                 self.end_headers()
@@ -423,6 +442,203 @@ class Handler(SimpleHTTPRequestHandler):
             json_response(self, {"ok": False, "error": "not-found"}, 404)
         except Exception as exc:  # Keep local server debuggable for the admin screen.
             json_response(self, {"ok": False, "error": str(exc)}, 500)
+
+
+def wsgi_status(code: int) -> str:
+    labels = {
+        200: "OK",
+        204: "No Content",
+        400: "Bad Request",
+        403: "Forbidden",
+        404: "Not Found",
+        405: "Method Not Allowed",
+        500: "Internal Server Error",
+    }
+    return f"{code} {labels.get(code, 'OK')}"
+
+
+def wsgi_origin(environ: dict) -> str | None:
+    origin = environ.get("HTTP_ORIGIN")
+    host = environ.get("HTTP_HOST", "")
+    return origin if origin in same_host_origins(host) else None
+
+
+def wsgi_headers(environ: dict, content_type: str, length: int | None = None, extra: list[tuple[str, str]] | None = None) -> list[tuple[str, str]]:
+    headers = [("Content-Type", content_type)]
+    if length is not None:
+        headers.append(("Content-Length", str(length)))
+    origin = wsgi_origin(environ)
+    if origin:
+        headers.extend([("Access-Control-Allow-Origin", origin), ("Vary", "Origin")])
+    headers.extend(
+        [
+            ("Access-Control-Allow-Methods", "GET, POST, OPTIONS"),
+            ("Access-Control-Allow-Headers", "Content-Type, X-CSRF-Token"),
+        ]
+    )
+    if extra:
+        headers.extend(extra)
+    return headers
+
+
+def wsgi_json(environ: dict, start_response, payload: object, status: int = 200):
+    data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    start_response(wsgi_status(status), wsgi_headers(environ, JSON_MIME, len(data)))
+    return [data]
+
+
+def wsgi_read_json(environ: dict) -> dict:
+    length = int(environ.get("CONTENT_LENGTH") or "0")
+    if length > MAX_UPLOAD_BYTES:
+        raise ValueError("Istek cok buyuk.")
+    raw = environ["wsgi.input"].read(length) if length else b""
+    return json.loads(raw.decode("utf-8")) if raw else {}
+
+
+def wsgi_origin_is_allowed(environ: dict) -> bool:
+    return not environ.get("HTTP_ORIGIN") or bool(wsgi_origin(environ))
+
+
+def wsgi_csrf_is_valid(environ: dict) -> bool:
+    return environ.get("HTTP_X_CSRF_TOKEN") == CSRF_TOKEN
+
+
+def ensure_wsgi_ready() -> None:
+    global _WSGI_READY
+    if not _WSGI_READY:
+        init_db()
+        _WSGI_READY = True
+
+
+def wsgi_static(environ: dict, start_response, path: str):
+    target = static_file_path(path)
+    if not target:
+        return wsgi_json(environ, start_response, {"ok": False, "error": "blocked"}, 403)
+    if not target.exists() or not target.is_file():
+        return wsgi_json(environ, start_response, {"ok": False, "error": "not-found"}, 404)
+    data = target.read_bytes()
+    content_type = mimetypes.guess_type(str(target))[0] or "application/octet-stream"
+    start_response(wsgi_status(200), wsgi_headers(environ, content_type, len(data)))
+    return [data]
+
+
+def application(environ, start_response):
+    """PythonAnywhere-compatible WSGI entrypoint."""
+    ensure_wsgi_ready()
+    method = environ.get("REQUEST_METHOD", "GET").upper()
+    path = environ.get("PATH_INFO") or "/"
+    try:
+        if method == "OPTIONS":
+            if not wsgi_origin_is_allowed(environ):
+                return wsgi_json(environ, start_response, {"ok": False, "error": "origin-blocked"}, 403)
+            start_response(wsgi_status(204), wsgi_headers(environ, JSON_MIME, 0))
+            return [b""]
+        if method == "GET":
+            if path == "/api/health":
+                return wsgi_json(environ, start_response, {"ok": True, "database": DB_PATH.name, "templateCount": len(KNOWN_TEMPLATES), "csrfToken": CSRF_TOKEN})
+            if path == "/api/state":
+                with sqlite3.connect(DB_PATH) as conn:
+                    row = conn.execute("SELECT payload_json, updated_at, updated_by, reason FROM app_state WHERE key = ?", (STATE_KEY,)).fetchone()
+                payload = sanitize_state_payload(json.loads(row[0])) if row else None
+                return wsgi_json(environ, start_response, {"ok": True, "payload": payload, "updatedAt": row[1] if row else None, "updatedBy": row[2] if row else None, "reason": row[3] if row else None})
+            if path == "/api/logs":
+                with sqlite3.connect(DB_PATH) as conn:
+                    rows = conn.execute("SELECT id, ts, actor, action, detail_json FROM logs ORDER BY id DESC LIMIT 100").fetchall()
+                logs = [
+                    {"id": row[0], "ts": row[1], "actor": row[2], "action": row[3], "detail": json.loads(row[4] or "{}")}
+                    for row in rows
+                ]
+                return wsgi_json(environ, start_response, {"ok": True, "logs": logs})
+            if path == "/api/snapshots":
+                with sqlite3.connect(DB_PATH) as conn:
+                    rows = conn.execute("SELECT id, ts, actor FROM snapshots ORDER BY id DESC LIMIT 50").fetchall()
+                return wsgi_json(environ, start_response, {"ok": True, "snapshots": [{"id": row[0], "ts": row[1], "actor": row[2]} for row in rows]})
+            return wsgi_static(environ, start_response, path)
+        if method == "POST":
+            if not wsgi_origin_is_allowed(environ):
+                return wsgi_json(environ, start_response, {"ok": False, "error": "origin-blocked"}, 403)
+            if not wsgi_csrf_is_valid(environ):
+                return wsgi_json(environ, start_response, {"ok": False, "error": "csrf-token-invalid"}, 403)
+            payload = wsgi_read_json(environ)
+            if path == "/api/log":
+                db_log(payload.get("actor", "anonim"), payload.get("action", "unknown"), payload.get("detail", {}))
+                return wsgi_json(environ, start_response, {"ok": True})
+            if path == "/api/state":
+                with sqlite3.connect(DB_PATH) as conn:
+                    conn.execute(
+                        """
+                        INSERT INTO app_state (key, payload_json, updated_at, updated_by, reason)
+                        VALUES (?, ?, ?, ?, ?)
+                        ON CONFLICT(key) DO UPDATE SET
+                            payload_json = excluded.payload_json,
+                            updated_at = excluded.updated_at,
+                            updated_by = excluded.updated_by,
+                            reason = excluded.reason
+                        """,
+                        (
+                            STATE_KEY,
+                            json.dumps(sanitize_state_payload(payload.get("payload") or {}), ensure_ascii=False),
+                            now_iso(),
+                            payload.get("actor", "anonim"),
+                            payload.get("reason", "manual"),
+                        ),
+                    )
+                db_log(payload.get("actor", "anonim"), "state.saved", {"reason": payload.get("reason", "manual")})
+                return wsgi_json(environ, start_response, {"ok": True})
+            if path == "/api/snapshot":
+                with sqlite3.connect(DB_PATH) as conn:
+                    cursor = conn.execute(
+                        "INSERT INTO snapshots (ts, actor, payload_json) VALUES (?, ?, ?)",
+                        (now_iso(), payload.get("actor", "anonim"), json.dumps(sanitize_state_payload(payload.get("payload") or {}), ensure_ascii=False)),
+                    )
+                    snapshot_id = cursor.lastrowid
+                db_log(payload.get("actor", "anonim"), "snapshot.created", {"snapshotId": snapshot_id})
+                return wsgi_json(environ, start_response, {"ok": True, "snapshotId": snapshot_id})
+            if path == "/api/docx/check":
+                source = template_path(payload.get("templateId"), payload.get("fileName"))
+                ok = bool(source and zipfile.is_zipfile(source))
+                return wsgi_json(
+                    environ,
+                    start_response,
+                    {
+                        "ok": ok,
+                        "fileName": source.name if source else payload.get("fileName"),
+                        "sha256": file_sha256(source) if ok and source else "",
+                        "source": "uploaded" if source and source.parent == UPLOAD_DIR else "provided",
+                    },
+                )
+            if path == "/api/docx/upload":
+                file_name = payload.get("fileName", "")
+                if file_name not in KNOWN_TEMPLATES.values():
+                    return wsgi_json(environ, start_response, {"ok": False, "error": "unknown-template"}, 400)
+                data = base64.b64decode(payload.get("dataBase64", ""), validate=True)
+                if len(data) > MAX_UPLOAD_BYTES:
+                    return wsgi_json(environ, start_response, {"ok": False, "error": "file-too-large"}, 400)
+                target = UPLOAD_DIR / file_name
+                target.write_bytes(data)
+                if not zipfile.is_zipfile(target):
+                    target.unlink(missing_ok=True)
+                    return wsgi_json(environ, start_response, {"ok": False, "error": "invalid-docx"}, 400)
+                digest = file_sha256(target)
+                with sqlite3.connect(DB_PATH) as conn:
+                    conn.execute(
+                        "INSERT INTO uploaded_templates (file_name, stored_path, sha256, uploaded_at, uploaded_by) VALUES (?, ?, ?, ?, ?)",
+                        (file_name, str(target), digest, now_iso(), payload.get("actor", "anonim")),
+                    )
+                db_log(payload.get("actor", "anonim"), "template.uploaded", {"fileName": file_name, "sha256": digest})
+                return wsgi_json(environ, start_response, {"ok": True, "sha256": digest})
+            if path == "/api/docx/export":
+                data, source_name = filled_docx(payload)
+                db_log(payload.get("actor", "anonim"), "document.exported", {"template": source_name, "project": payload.get("projectName", "")})
+                file_name = f"{payload.get('projectName', 'proje')}-{payload.get('title', 'belge')}.docx"
+                safe_name = "".join("-" if char in '\\/:*?"<>|' else char for char in file_name)
+                headers = [("Content-Disposition", f'attachment; filename="{safe_name.encode("ascii", "ignore").decode("ascii") or "belge.docx"}"')]
+                start_response(wsgi_status(200), wsgi_headers(environ, DOCX_MIME, len(data), headers))
+                return [data]
+            return wsgi_json(environ, start_response, {"ok": False, "error": "not-found"}, 404)
+        return wsgi_json(environ, start_response, {"ok": False, "error": "method-not-allowed"}, 405)
+    except Exception as exc:
+        return wsgi_json(environ, start_response, {"ok": False, "error": str(exc)}, 500)
 
 
 def check_environment() -> int:
