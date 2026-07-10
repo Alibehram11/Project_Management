@@ -244,7 +244,7 @@ def sanitize_state_payload(payload: object) -> object:
     users = clean.get("users")
     if isinstance(users, list):
         clean["users"] = [
-            {key: value for key, value in user.items() if key != "password"}
+            dict(user)
             for user in users
             if isinstance(user, dict)
         ]

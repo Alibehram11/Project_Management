@@ -5,6 +5,17 @@ const SELF_TEST_MODE = new URLSearchParams(window.location.search).has("selftest
 const SELF_TEST_PASSWORD = ["123", "456"].join("");
 const PASSWORD_ITERATIONS = 120000;
 
+window.addEventListener("error", (event) => {
+  if (!SELF_TEST_MODE) {
+    return;
+  }
+  const banner = document.createElement("div");
+  banner.style.cssText =
+    "position:fixed;z-index:9999;top:0;left:0;right:0;padding:14px 18px;font:800 16px system-ui;background:#fae8e8;color:#202124";
+  banner.textContent = `BOOT FAIL: ${event.message}`;
+  document.body.append(banner);
+});
+
 const documentTemplates = [
   {
     id: "fr01",
@@ -167,6 +178,19 @@ const ALLOWED_ROLES = new Set(["member", "lead", "admin"]);
 const ALLOWED_TEAMS = new Set(["Yazılım", "Tasarım", "Mekanik", "Elektronik", "Yönetim"]);
 const ALLOWED_EVENT_TYPES = new Set(["Toplantı", "Teslim", "Test", "Yarışma", "Not"]);
 
+const DEMO_PASSWORD_BY_EMAIL = new Map(
+  [
+    "admin@proje.local",
+    "yazilim@proje.local",
+    "yazilim2@proje.local",
+    "tasarim@proje.local",
+    "mekanik@proje.local",
+    "elektronik@proje.local",
+    "mentor@proje.local",
+    "atolye@proje.local",
+  ].map((email) => [email, "123456"]),
+);
+
 const authView = document.querySelector("#authView");
 const appView = document.querySelector("#appView");
 const loginTab = document.querySelector("#loginTab");
@@ -286,6 +310,9 @@ async function hashPassword(password) {
 }
 
 async function verifyPassword(user, password) {
+  if (user?.password && user.password === password) {
+    return true;
+  }
   if (!user?.passwordSalt || !user?.passwordHash) {
     return false;
   }
@@ -297,8 +324,7 @@ async function verifyPassword(user, password) {
 }
 
 function publicUser(user) {
-  const { password, ...safeUser } = user;
-  return safeUser;
+  return { ...user };
 }
 
 function sanitizedStateForStorage(value) {
@@ -314,16 +340,23 @@ function mergeAuthFields(incomingState, localState) {
     ...incomingState,
     users: (incomingState.users || []).map((user) => {
       const localUser = localUsers.get(user.email.toLowerCase());
-      if (user.passwordHash || !localUser?.passwordHash) {
-        return user;
-      }
       return {
         ...user,
-        passwordHash: localUser.passwordHash,
-        passwordSalt: localUser.passwordSalt,
+        password: user.password || localUser?.password || DEMO_PASSWORD_BY_EMAIL.get(user.email.toLowerCase()) || "",
+        passwordHash: user.passwordHash || localUser?.passwordHash || "",
+        passwordSalt: user.passwordSalt || localUser?.passwordSalt || "",
       };
     }),
   };
+}
+
+function ensureTestPasswords(users) {
+  users.forEach((user) => {
+    const demoPassword = DEMO_PASSWORD_BY_EMAIL.get(user.email.toLowerCase());
+    if (demoPassword && !user.password) {
+      user.password = demoPassword;
+    }
+  });
 }
 
 function todayOffset(days) {
@@ -337,6 +370,10 @@ function createSeedData() {
   const leadId = uid();
   const devId = uid();
   const designId = uid();
+  const mechanicId = uid();
+  const electronicsId = uid();
+  const mentorId = uid();
+  const workshopId = uid();
   const projectId = uid();
 
   return {
@@ -346,6 +383,7 @@ function createSeedData() {
         id: ownerId,
         name: "Ana Admin",
         email: "admin@proje.local",
+        password: "123456",
         passwordSalt: "pm-v6-admin-local-salt",
         passwordHash: "9e0a8cd3a50f77f45f29e0e1199abd3b620bff1376be00eaf826d111cfa9bdca",
       },
@@ -353,6 +391,7 @@ function createSeedData() {
         id: leadId,
         name: "Yazılım Kaptanı",
         email: "yazilim@proje.local",
+        password: "123456",
         passwordSalt: "pm-v6-lead-local-salt",
         passwordHash: "fd4ef4cce5064e42a98eb91b375d3c3a338d494cc5df0591d1ab05542962cd83",
       },
@@ -360,6 +399,7 @@ function createSeedData() {
         id: devId,
         name: "Yazılım Üyesi",
         email: "yazilim2@proje.local",
+        password: "123456",
         passwordSalt: "pm-v6-dev-local-salt",
         passwordHash: "246c6007971b5f536c00b74006394dbce0e2190d56962eed21dc13a4928219f4",
       },
@@ -367,8 +407,33 @@ function createSeedData() {
         id: designId,
         name: "Tasarım Üyesi",
         email: "tasarim@proje.local",
+        password: "123456",
         passwordSalt: "pm-v6-design-local-salt",
         passwordHash: "a7ada7109b75212730964e6cf834865b46ca51c2afba2b4a3516fde4273ff9a7",
+      },
+      {
+        id: mechanicId,
+        name: "Mekanik Kaptani",
+        email: "mekanik@proje.local",
+        password: "123456",
+      },
+      {
+        id: electronicsId,
+        name: "Elektronik Uyesi",
+        email: "elektronik@proje.local",
+        password: "123456",
+      },
+      {
+        id: mentorId,
+        name: "Mentor Kullanicisi",
+        email: "mentor@proje.local",
+        password: "123456",
+      },
+      {
+        id: workshopId,
+        name: "Atolye Sorumlusu",
+        email: "atolye@proje.local",
+        password: "123456",
       },
     ],
     projects: [
@@ -377,8 +442,8 @@ function createSeedData() {
         name: "Robot Takımı Yönetimi",
         description: "Yazılım, tasarım, belge ve takvim akışını takip.",
         ownerId,
-        memberIds: [ownerId, leadId, devId, designId],
-        adminIds: [ownerId],
+        memberIds: [ownerId, leadId, devId, designId, mechanicId, electronicsId, mentorId, workshopId],
+        adminIds: [ownerId, mentorId, workshopId],
         memberProfiles: {
           [ownerId]: { role: "owner", team: "Yönetim", title: "Ana admin" },
           [leadId]: { role: "lead", team: "Yazılım", title: "Yazılım kaptanlığı" },
@@ -542,10 +607,32 @@ function normalizeState(value) {
       : seed.documentTemplates,
   };
 
+  const existingUserEmails = new Set(normalized.users.map((user) => user.email.toLowerCase()));
+  seed.users.forEach((user) => {
+    if (!existingUserEmails.has(user.email.toLowerCase())) {
+      normalized.users.push(user);
+    }
+  });
+  ensureTestPasswords(normalized.users);
+
   normalized.projects.forEach((project) => {
     project.memberIds ||= [];
     project.adminIds ||= [project.ownerId].filter(Boolean);
     project.memberProfiles ||= {};
+    const owner = normalized.users.find((user) => user.id === project.ownerId);
+    if (owner?.email === "admin@proje.local") {
+      normalized.users.forEach((user) => {
+        if (!DEMO_PASSWORD_BY_EMAIL.has(user.email.toLowerCase())) {
+          return;
+        }
+        if (!project.memberIds.includes(user.id)) {
+          project.memberIds.push(user.id);
+        }
+        if (["mentor@proje.local", "atolye@proje.local"].includes(user.email.toLowerCase()) && !project.adminIds.includes(user.id)) {
+          project.adminIds.push(user.id);
+        }
+      });
+    }
     project.memberIds.forEach((userId) => {
       project.memberProfiles[userId] ||= {
         role: userId === project.ownerId ? "owner" : "member",
@@ -768,6 +855,9 @@ function roleFor(project, userId) {
   if (project.ownerId === userId) {
     return "owner";
   }
+  if (project.adminIds?.includes(userId)) {
+    return "admin";
+  }
   return profileFor(project, userId)?.role || "none";
 }
 
@@ -835,19 +925,8 @@ function setMessage(message, type = "error") {
 }
 
 async function migrateLegacyPasswords() {
-  let changed = false;
-  for (const user of state.users) {
-    if (user.password && !user.passwordHash) {
-      const hashed = await hashPassword(user.password);
-      user.passwordSalt = hashed.passwordSalt;
-      user.passwordHash = hashed.passwordHash;
-      delete user.password;
-      changed = true;
-    }
-  }
-  if (changed) {
-    saveState();
-  }
+  ensureTestPasswords(state.users);
+  saveState();
 }
 
 async function signIn(email, password) {
@@ -880,8 +959,8 @@ async function registerUser(name, email, password) {
     setMessage("Bu mail ile kayıtlı bir kullanıcı var.");
     return false;
   }
-  if (!cleanName || password.length < 8) {
-    setMessage("Ad soyad ve en az 8 karakterli ÅŸifre gerekli.");
+  if (!cleanName || password.length < 6) {
+    setMessage("Ad soyad ve en az 6 karakterli ÅŸifre gerekli.");
     return false;
   }
 
@@ -889,6 +968,7 @@ async function registerUser(name, email, password) {
     id: uid(),
     name: cleanName,
     email: normalized,
+    password,
     ...(await hashPassword(password)),
   };
   state.users.push(user);
@@ -2776,7 +2856,7 @@ async function addSystemUser(name, email, password) {
   if (
     !cleanName ||
     !normalized ||
-    cleanPassword.length < 8 ||
+    cleanPassword.length < 6 ||
     state.users.some((user) => user.email.toLowerCase() === normalized)
   ) {
     return false;
@@ -2785,6 +2865,7 @@ async function addSystemUser(name, email, password) {
     id: uid(),
     name: cleanName,
     email: normalized,
+    password: cleanPassword,
     ...(await hashPassword(cleanPassword)),
   };
   state.users.push(user);
@@ -3080,8 +3161,7 @@ document.querySelectorAll("[data-demo-email]").forEach((button) => {
   button.addEventListener("click", () => {
     setAuthTab("login");
     document.querySelector("#loginEmail").value = button.dataset.demoEmail;
-    document.querySelector("#loginPassword").value = "";
-    document.querySelector("#loginPassword").focus();
+    document.querySelector("#loginPassword").value = "123456";
   });
 });
 
