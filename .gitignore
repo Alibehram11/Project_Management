@@ -209,6 +209,7 @@ uploaded_templates/
 self-test-result.png
 atolye-test-result.png
 .atolye-source/
+pythonanywhere_upload/
 
 # Ruff stuff:
 .ruff_cache/

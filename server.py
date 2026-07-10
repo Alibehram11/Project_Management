@@ -281,14 +281,19 @@ def static_file_path(request_path: str) -> Path | None:
     if path in BLOCKED_STATIC_PATHS or path.startswith("/uploaded_templates/"):
         return None
     clean = unquote(path).lstrip("/")
-    if not clean:
-        clean = "index.html"
-    candidate = (ROOT / clean).resolve()
-    if candidate != ROOT and ROOT not in candidate.parents:
-        return None
-    if candidate.is_dir():
-        candidate = candidate / "index.html"
-    return candidate
+    candidates = [ROOT / clean] if clean else [ROOT / "index.html", ROOT / "templates" / "index.html"]
+    if clean in {"app.js", "styles.css"}:
+        candidates.append(ROOT / "static" / clean)
+
+    for candidate in candidates:
+        resolved = candidate.resolve()
+        if resolved != ROOT and ROOT not in resolved.parents:
+            continue
+        if resolved.is_dir():
+            resolved = resolved / "index.html"
+        if resolved.exists():
+            return resolved
+    return candidates[-1].resolve()
 
 
 class Handler(SimpleHTTPRequestHandler):
