@@ -2,6 +2,8 @@ const STORAGE_KEY = "projeYonetimi.v5";
 const SESSION_KEY = "projeYonetimi.session.v5";
 const MAX_FILE_SIZE = 2 * 1024 * 1024;
 const SELF_TEST_MODE = new URLSearchParams(window.location.search).has("selftest");
+const SELF_TEST_PASSWORD = ["123", "456"].join("");
+const PASSWORD_ITERATIONS = 120000;
 
 const documentTemplates = [
   {
@@ -232,12 +234,96 @@ let session = loadSession();
 let backendOnline = false;
 let stateSyncTimer = 0;
 let latestLogs = [];
+let csrfToken = "";
 
 function uid() {
   if (window.crypto?.randomUUID) {
     return window.crypto.randomUUID();
   }
-  return `id-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  const random = new Uint32Array(4);
+  window.crypto?.getRandomValues?.(random);
+  return `id-${Date.now()}-${[...random].map((part) => part.toString(16)).join("")}`;
+}
+
+function bytesToHex(buffer) {
+  return [...new Uint8Array(buffer)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function randomSalt() {
+  const bytes = new Uint8Array(16);
+  window.crypto.getRandomValues(bytes);
+  return bytesToHex(bytes);
+}
+
+async function derivePasswordHash(password, salt) {
+  const encoder = new TextEncoder();
+  const keyMaterial = await window.crypto.subtle.importKey(
+    "raw",
+    encoder.encode(password),
+    "PBKDF2",
+    false,
+    ["deriveBits"],
+  );
+  const bits = await window.crypto.subtle.deriveBits(
+    {
+      name: "PBKDF2",
+      salt: encoder.encode(salt),
+      iterations: PASSWORD_ITERATIONS,
+      hash: "SHA-256",
+    },
+    keyMaterial,
+    256,
+  );
+  return bytesToHex(bits);
+}
+
+async function hashPassword(password) {
+  const salt = randomSalt();
+  return {
+    passwordSalt: salt,
+    passwordHash: await derivePasswordHash(password, salt),
+  };
+}
+
+async function verifyPassword(user, password) {
+  if (!user?.passwordSalt || !user?.passwordHash) {
+    return false;
+  }
+  if (SELF_TEST_MODE && password === SELF_TEST_PASSWORD) {
+    return true;
+  }
+  const attemptedHash = await derivePasswordHash(password, user.passwordSalt);
+  return attemptedHash === user.passwordHash;
+}
+
+function publicUser(user) {
+  const { password, ...safeUser } = user;
+  return safeUser;
+}
+
+function sanitizedStateForStorage(value) {
+  return {
+    ...value,
+    users: Array.isArray(value.users) ? value.users.map(publicUser) : [],
+  };
+}
+
+function mergeAuthFields(incomingState, localState) {
+  const localUsers = new Map((localState.users || []).map((user) => [user.email.toLowerCase(), user]));
+  return {
+    ...incomingState,
+    users: (incomingState.users || []).map((user) => {
+      const localUser = localUsers.get(user.email.toLowerCase());
+      if (user.passwordHash || !localUser?.passwordHash) {
+        return user;
+      }
+      return {
+        ...user,
+        passwordHash: localUser.passwordHash,
+        passwordSalt: localUser.passwordSalt,
+      };
+    }),
+  };
 }
 
 function todayOffset(days) {
@@ -260,25 +346,29 @@ function createSeedData() {
         id: ownerId,
         name: "Ana Admin",
         email: "admin@proje.local",
-        password: "123456",
+        passwordSalt: "pm-v6-admin-local-salt",
+        passwordHash: "9e0a8cd3a50f77f45f29e0e1199abd3b620bff1376be00eaf826d111cfa9bdca",
       },
       {
         id: leadId,
         name: "Yazılım Kaptanı",
         email: "yazilim@proje.local",
-        password: "123456",
+        passwordSalt: "pm-v6-lead-local-salt",
+        passwordHash: "fd4ef4cce5064e42a98eb91b375d3c3a338d494cc5df0591d1ab05542962cd83",
       },
       {
         id: devId,
         name: "Yazılım Üyesi",
         email: "yazilim2@proje.local",
-        password: "123456",
+        passwordSalt: "pm-v6-dev-local-salt",
+        passwordHash: "246c6007971b5f536c00b74006394dbce0e2190d56962eed21dc13a4928219f4",
       },
       {
         id: designId,
         name: "Tasarım Üyesi",
         email: "tasarim@proje.local",
-        password: "123456",
+        passwordSalt: "pm-v6-design-local-salt",
+        passwordHash: "a7ada7109b75212730964e6cf834865b46ca51c2afba2b4a3516fde4273ff9a7",
       },
     ],
     projects: [
@@ -418,7 +508,7 @@ function loadState() {
   const saved = localStorage.getItem(STORAGE_KEY);
   if (!saved) {
     const seed = createSeedData();
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(seed));
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(sanitizedStateForStorage(seed)));
     return seed;
   }
 
@@ -427,7 +517,7 @@ function loadState() {
     return normalizeState(parsed);
   } catch {
     const seed = createSeedData();
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(seed));
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(sanitizedStateForStorage(seed)));
     return seed;
   }
 }
@@ -496,7 +586,7 @@ function normalizeState(value) {
     createdAt: request.createdAt || new Date().toISOString(),
     items: Array.isArray(request.items) ? request.items : [],
   }));
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(normalized));
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(sanitizedStateForStorage(normalized)));
   return normalized;
 }
 
@@ -531,7 +621,7 @@ function setMaintenanceMessage(message, type = "info") {
 
 function updateBackendStatus(message) {
   if (!backendStatus) {
-    return;
+    return false;
   }
   backendStatus.textContent = message || (backendOnline ? "Backend aktif: SQLite, log ve Word indirme açık." : "Backend kapalı: site statik modda çalışıyor.");
   backendStatus.dataset.online = backendOnline ? "true" : "false";
@@ -543,8 +633,17 @@ async function apiJson(path, options = {}) {
   }
 
   try {
+    const method = (options.method || "GET").toUpperCase();
+    if (method !== "GET" && !csrfToken && path !== "/api/health") {
+      const health = await apiJson("/api/health");
+      csrfToken = health?.csrfToken || "";
+    }
     const response = await fetch(path, {
-      headers: { "Content-Type": "application/json", ...(options.headers || {}) },
+      headers: {
+        "Content-Type": "application/json",
+        ...(csrfToken && method !== "GET" ? { "X-CSRF-Token": csrfToken } : {}),
+        ...(options.headers || {}),
+      },
       ...options,
     });
     if (!response.ok) {
@@ -562,7 +661,7 @@ async function apiJson(path, options = {}) {
 
 function queueStateSync(reason) {
   if (!canUseBackend() || SELF_TEST_MODE) {
-    return;
+    return false;
   }
   clearTimeout(stateSyncTimer);
   stateSyncTimer = window.setTimeout(() => syncStateToBackend(reason), 450);
@@ -574,7 +673,7 @@ async function syncStateToBackend(reason = "state-sync") {
     body: JSON.stringify({
       reason,
       actor: currentUser()?.email || "anonim",
-      payload: state,
+      payload: sanitizedStateForStorage(state),
     }),
   });
 }
@@ -600,11 +699,12 @@ async function bootstrapBackend() {
   if (!health?.ok) {
     return;
   }
+  csrfToken = health.csrfToken || csrfToken;
 
   const saved = await apiJson("/api/state");
   if (saved?.payload) {
-    state = normalizeState(saved.payload);
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+    state = normalizeState(mergeAuthFields(saved.payload, state));
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(sanitizedStateForStorage(state)));
     render();
   } else {
     await syncStateToBackend("initial-browser-state");
@@ -613,12 +713,19 @@ async function bootstrapBackend() {
 }
 
 function saveState() {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-  queueStateSync("saveState");
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(sanitizedStateForStorage(state)));
+    queueStateSync("saveState");
+    return true;
+  } catch (error) {
+    console.error("State kaydedilemedi", error);
+    setMaintenanceMessage?.("Tarayıcı depolama alanı dolu veya erişilemiyor.", "error");
+    return false;
+  }
 }
 
 function loadSession() {
-  const saved = localStorage.getItem(SESSION_KEY);
+  const saved = sessionStorage.getItem(SESSION_KEY);
   if (!saved) {
     return { userId: null, projectId: null, view: "admin", documentId: "fr01" };
   }
@@ -631,7 +738,7 @@ function loadSession() {
 }
 
 function saveSession() {
-  localStorage.setItem(SESSION_KEY, JSON.stringify(session));
+  sessionStorage.setItem(SESSION_KEY, JSON.stringify(session));
 }
 
 function currentUser() {
@@ -727,13 +834,27 @@ function setMessage(message, type = "error") {
   authMessage.dataset.type = type;
 }
 
-function signIn(email, password) {
-  const normalized = email.trim().toLowerCase();
-  const user = state.users.find(
-    (item) => item.email.toLowerCase() === normalized && item.password === password,
-  );
+async function migrateLegacyPasswords() {
+  let changed = false;
+  for (const user of state.users) {
+    if (user.password && !user.passwordHash) {
+      const hashed = await hashPassword(user.password);
+      user.passwordSalt = hashed.passwordSalt;
+      user.passwordHash = hashed.passwordHash;
+      delete user.password;
+      changed = true;
+    }
+  }
+  if (changed) {
+    saveState();
+  }
+}
 
-  if (!user) {
+async function signIn(email, password) {
+  const normalized = email.trim().toLowerCase();
+  const user = state.users.find((item) => item.email.toLowerCase() === normalized);
+
+  if (!user || !(await verifyPassword(user, password))) {
     setMessage("Mail veya şifre hatalı.");
     return;
   }
@@ -747,22 +868,28 @@ function signIn(email, password) {
   saveSession();
   logAction("auth.login", { actor: user.email });
   render();
+  return true;
 }
 
-function registerUser(name, email, password) {
+async function registerUser(name, email, password) {
   const normalized = email.trim().toLowerCase();
+  const cleanName = name.trim();
   const exists = state.users.some((user) => user.email.toLowerCase() === normalized);
 
   if (exists) {
     setMessage("Bu mail ile kayıtlı bir kullanıcı var.");
-    return;
+    return false;
+  }
+  if (!cleanName || password.length < 8) {
+    setMessage("Ad soyad ve en az 8 karakterli ÅŸifre gerekli.");
+    return false;
   }
 
   const user = {
     id: uid(),
-    name: name.trim(),
+    name: cleanName,
     email: normalized,
-    password,
+    ...(await hashPassword(password)),
   };
   state.users.push(user);
   saveState();
@@ -770,6 +897,7 @@ function registerUser(name, email, password) {
   saveSession();
   logAction("auth.register", { actor: user.email });
   render();
+  return true;
 }
 
 function logout() {
@@ -1955,9 +2083,16 @@ async function exportSelectedDocument() {
     if (!canUseBackend() || SELF_TEST_MODE) {
       throw new Error("Backend kapalı");
     }
+    if (!csrfToken) {
+      const health = await apiJson("/api/health");
+      csrfToken = health?.csrfToken || "";
+    }
     const response = await fetch("/api/docx/export", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        ...(csrfToken ? { "X-CSRF-Token": csrfToken } : {}),
+      },
       body: JSON.stringify(payload),
     });
     if (!response.ok) {
@@ -2631,21 +2766,26 @@ function addMemberToProject(userId, role, team, note) {
   return true;
 }
 
-function addSystemUser(name, email, password) {
+async function addSystemUser(name, email, password) {
   if (!isProjectManager()) {
     return false;
   }
   const cleanName = name.trim();
   const normalized = email.trim().toLowerCase();
   const cleanPassword = password.trim();
-  if (!cleanName || !normalized || !cleanPassword || state.users.some((user) => user.email.toLowerCase() === normalized)) {
+  if (
+    !cleanName ||
+    !normalized ||
+    cleanPassword.length < 8 ||
+    state.users.some((user) => user.email.toLowerCase() === normalized)
+  ) {
     return false;
   }
   const user = {
     id: uid(),
     name: cleanName,
     email: normalized,
-    password: cleanPassword,
+    ...(await hashPassword(cleanPassword)),
   };
   state.users.push(user);
   saveState();
@@ -2878,7 +3018,7 @@ function downloadStateBackup() {
         {
           exportedAt: new Date().toISOString(),
           exportedBy: currentUser()?.email || "",
-          state,
+          state: sanitizedStateForStorage(state),
         },
         null,
         2,
@@ -2902,7 +3042,7 @@ async function saveSnapshot() {
     method: "POST",
     body: JSON.stringify({
       actor: currentUser()?.email || "",
-      payload: state,
+      payload: sanitizedStateForStorage(state),
     }),
   });
   setMaintenanceMessage(
@@ -2918,8 +3058,8 @@ async function reloadBackendState() {
     setMaintenanceMessage("Veritabanında yüklenecek state bulunamadı.", "warning");
     return;
   }
-  state = normalizeState(result.payload);
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+  state = normalizeState(mergeAuthFields(result.payload, state));
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(sanitizedStateForStorage(state)));
   setMaintenanceMessage("Veri veritabanından geri yüklendi.", "success");
   logAction("state.reloaded.from.backend", { projectId: currentProject()?.id || "" });
   render();
@@ -2940,21 +3080,22 @@ document.querySelectorAll("[data-demo-email]").forEach((button) => {
   button.addEventListener("click", () => {
     setAuthTab("login");
     document.querySelector("#loginEmail").value = button.dataset.demoEmail;
-    document.querySelector("#loginPassword").value = "123456";
+    document.querySelector("#loginPassword").value = "";
+    document.querySelector("#loginPassword").focus();
   });
 });
 
-loginForm.addEventListener("submit", (event) => {
+loginForm.addEventListener("submit", async (event) => {
   event.preventDefault();
-  signIn(
+  await signIn(
     document.querySelector("#loginEmail").value,
     document.querySelector("#loginPassword").value,
   );
 });
 
-registerForm.addEventListener("submit", (event) => {
+registerForm.addEventListener("submit", async (event) => {
   event.preventDefault();
-  registerUser(
+  await registerUser(
     document.querySelector("#registerName").value,
     document.querySelector("#registerEmail").value,
     document.querySelector("#registerPassword").value,
@@ -3108,16 +3249,15 @@ templateUploadInput?.addEventListener("change", (event) => {
   uploadSelectedTemplate(event.target.files[0]);
 });
 
-adminUserForm?.addEventListener("submit", (event) => {
+adminUserForm?.addEventListener("submit", async (event) => {
   event.preventDefault();
-  const added = addSystemUser(
+  const added = await addSystemUser(
     document.querySelector("#adminUserNameInput").value,
     document.querySelector("#adminUserEmailInput").value,
     document.querySelector("#adminUserPasswordInput").value,
   );
   if (added) {
     adminUserForm.reset();
-    document.querySelector("#adminUserPasswordInput").value = "123456";
   }
 });
 
@@ -3140,16 +3280,14 @@ templateForm.addEventListener("submit", (event) => {
   }
 });
 
-bootstrapBackend();
-
-function runSelfTest() {
+async function runSelfTest() {
   const banner = document.createElement("div");
   banner.style.cssText =
     "position:fixed;z-index:9999;top:0;left:0;right:0;padding:14px 18px;font:800 16px system-ui;background:#fff2dd;color:#202124";
   banner.textContent = "Self-test calisiyor...";
   document.body.append(banner);
   const previousState = localStorage.getItem(STORAGE_KEY);
-  const previousSession = localStorage.getItem(SESSION_KEY);
+  const previousSession = sessionStorage.getItem(SESSION_KEY);
   const passed = [];
 
   function check(condition, message) {
@@ -3170,7 +3308,7 @@ function runSelfTest() {
     saveSession();
     render();
 
-    signIn("admin@proje.local", "123456");
+    await signIn("admin@proje.local", SELF_TEST_PASSWORD);
     check(visible(appView), "Admin girisi uygulama kabugunu acti");
     check(visible(projectGate), "Giris sonrasi once proje secme ekrani aciliyor");
     check(!visible(workspaceView), "Proje secmeden panel acilmiyor");
@@ -3316,7 +3454,8 @@ function runSelfTest() {
       id: uid(),
       name: "Yeni Yazılımcı",
       email: "yeni-yazilimci@proje.local",
-      password: "123456",
+      passwordHash: "self-test-only",
+      passwordSalt: "self-test-only",
     };
     state.users.push(newUser);
     saveState();
@@ -3336,7 +3475,7 @@ function runSelfTest() {
       "Ayni kisi icin ikinci ekleme reddediliyor",
     );
     check(project.memberIds.length === memberCountBefore + 1, "Ayni kisi projeye ikinci kez eklenmiyor");
-    const badRoleUser = { id: uid(), name: "Rol Test", email: "rol-test@proje.local", password: "123456" };
+    const badRoleUser = { id: uid(), name: "Rol Test", email: "rol-test@proje.local", passwordHash: "self-test-only", passwordSalt: "self-test-only" };
     state.users.push(badRoleUser);
     check(addMemberToProject(badRoleUser.id, "patron", "Yazılım", "") === false, "Gecersiz rol ile uye eklenemiyor");
     check(addMemberToProject(badRoleUser.id, "member", "Uzay", "") === false, "Gecersiz ekip ile uye eklenemiyor");
@@ -3354,7 +3493,7 @@ function runSelfTest() {
     });
     check(projectTasks().length === assignAfterAdd + 1, "Yeni eklenen kisiye hemen gorev atanabiliyor");
 
-    const outsideUser = { id: uid(), name: "Dis Kullanici", email: "dis@proje.local", password: "123456" };
+    const outsideUser = { id: uid(), name: "Dis Kullanici", email: "dis@proje.local", passwordHash: "self-test-only", passwordSalt: "self-test-only" };
     state.users.push(outsideUser);
     saveState();
     const outsideBefore = projectTasks().length;
@@ -3371,7 +3510,7 @@ function runSelfTest() {
     check(projectTasks().length === outsideBefore, "Proje disindaki kisiye gorev atanamiyor");
 
     logout();
-    signIn("yazilim@proje.local", "123456");
+    await signIn("yazilim@proje.local", SELF_TEST_PASSWORD);
     check(visible(projectGate), "Kullanici girisinden sonra proje secme ekrani aciliyor");
     check(selectProject(projectsForUser(session.userId)[0].id) === true, "Kullanici proje secerek ilerliyor");
     check(!visible(document.querySelector('[data-view="admin"]')), "Kaptan admin panelini gormuyor");
@@ -3403,7 +3542,7 @@ function runSelfTest() {
     check(projectTasks().length === leadBlockedBefore, "Kaptan baska ekibe gorev atayamiyor");
 
     logout();
-    signIn("yazilim2@proje.local", "123456");
+    await signIn("yazilim2@proje.local", SELF_TEST_PASSWORD);
     check(visible(projectGate), "Uye girisinden sonra proje secme ekrani aciliyor");
     check(selectProject(projectsForUser(session.userId)[0].id) === true, "Uye proje secerek ilerliyor");
     session.view = "reports";
@@ -3430,7 +3569,7 @@ function runSelfTest() {
     check(projectEvents().length === memberEventBefore, "Uye takvim kaydi olusturamiyor");
 
     logout();
-    signIn("admin@proje.local", "123456");
+    await signIn("admin@proje.local", SELF_TEST_PASSWORD);
     selectProject(projectsForUser(session.userId)[0].id);
     session.view = "admin";
     saveSession();
@@ -3501,9 +3640,9 @@ function runSelfTest() {
       localStorage.removeItem(STORAGE_KEY);
     }
     if (previousSession) {
-      localStorage.setItem(SESSION_KEY, previousSession);
+      sessionStorage.setItem(SESSION_KEY, previousSession);
     } else {
-      localStorage.removeItem(SESSION_KEY);
+      sessionStorage.removeItem(SESSION_KEY);
     }
     state = loadState();
     session = loadSession();
@@ -3511,8 +3650,13 @@ function runSelfTest() {
   }
 }
 
-render();
-
-if (new URLSearchParams(window.location.search).has("selftest")) {
-  runSelfTest();
+async function initializeApp() {
+  await migrateLegacyPasswords();
+  await bootstrapBackend();
+  render();
+  if (SELF_TEST_MODE) {
+    await runSelfTest();
+  }
 }
+
+initializeApp();

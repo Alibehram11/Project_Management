@@ -5,6 +5,7 @@ import base64
 import hashlib
 import json
 import mimetypes
+import secrets
 import sqlite3
 import sys
 import zipfile
@@ -21,6 +22,7 @@ TEMPLATE_DIR = ROOT / "proje_yonetimi_ogrenci_belgeleri_word"
 UPLOAD_DIR = ROOT / "uploaded_templates"
 STATE_KEY = "main"
 MAX_UPLOAD_BYTES = 12 * 1024 * 1024
+CSRF_TOKEN = secrets.token_urlsafe(32)
 
 KNOWN_TEMPLATES = {
     "fr01": "01_FR-01_Proje_Tanim_Karti.docx",
@@ -65,6 +67,8 @@ def init_db() -> None:
             )
             """
         )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_logs_ts ON logs (ts)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_logs_action ON logs (action)")
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS snapshots (
@@ -75,6 +79,7 @@ def init_db() -> None:
             )
             """
         )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_snapshots_ts ON snapshots (ts)")
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS uploaded_templates (
@@ -87,6 +92,13 @@ def init_db() -> None:
             )
             """
         )
+        row = conn.execute("SELECT payload_json FROM app_state WHERE key = ?", (STATE_KEY,)).fetchone()
+        if row:
+            clean_payload = sanitize_state_payload(json.loads(row[0]))
+            conn.execute(
+                "UPDATE app_state SET payload_json = ?, updated_at = ?, reason = ? WHERE key = ?",
+                (json.dumps(clean_payload, ensure_ascii=False), now_iso(), "security-sanitize", STATE_KEY),
+            )
 
 
 def db_log(actor: str, action: str, detail: object | None = None) -> None:
@@ -94,6 +106,9 @@ def db_log(actor: str, action: str, detail: object | None = None) -> None:
         conn.execute(
             "INSERT INTO logs (ts, actor, action, detail_json) VALUES (?, ?, ?, ?)",
             (now_iso(), actor or "anonim", action, json.dumps(detail or {}, ensure_ascii=False)),
+        )
+        conn.execute(
+            "DELETE FROM logs WHERE id NOT IN (SELECT id FROM logs ORDER BY id DESC LIMIT 1000)"
         )
 
 
@@ -222,6 +237,36 @@ def filled_docx(payload: dict) -> tuple[bytes, str]:
     return output.getvalue(), source_name
 
 
+def sanitize_state_payload(payload: object) -> object:
+    if not isinstance(payload, dict):
+        return {}
+    clean = dict(payload)
+    users = clean.get("users")
+    if isinstance(users, list):
+        clean["users"] = [
+            {key: value for key, value in user.items() if key != "password"}
+            for user in users
+            if isinstance(user, dict)
+        ]
+    return clean
+
+
+def allowed_origin(handler: SimpleHTTPRequestHandler) -> str | None:
+    host = handler.headers.get("Host", "")
+    return f"http://{host}" if host else None
+
+
+def request_origin_is_allowed(handler: SimpleHTTPRequestHandler) -> bool:
+    origin = handler.headers.get("Origin")
+    if not origin:
+        return True
+    return origin == allowed_origin(handler)
+
+
+def csrf_is_valid(handler: SimpleHTTPRequestHandler) -> bool:
+    return handler.headers.get("X-CSRF-Token") == CSRF_TOKEN
+
+
 class Handler(SimpleHTTPRequestHandler):
     server_version = "ProjeYonetimiLocal/1.0"
 
@@ -233,12 +278,18 @@ class Handler(SimpleHTTPRequestHandler):
         return str((ROOT / clean).resolve())
 
     def end_headers(self) -> None:
-        self.send_header("Access-Control-Allow-Origin", "*")
+        origin = self.headers.get("Origin")
+        if origin and origin == allowed_origin(self):
+            self.send_header("Access-Control-Allow-Origin", origin)
+            self.send_header("Vary", "Origin")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, X-CSRF-Token")
         super().end_headers()
 
     def do_OPTIONS(self) -> None:
+        if not request_origin_is_allowed(self):
+            json_response(self, {"ok": False, "error": "origin-blocked"}, 403)
+            return
         self.send_response(204)
         self.end_headers()
 
@@ -249,12 +300,12 @@ class Handler(SimpleHTTPRequestHandler):
             json_response(self, {"ok": False, "error": "blocked"}, 403)
             return
         if path == "/api/health":
-            json_response(self, {"ok": True, "database": DB_PATH.name, "templateCount": len(KNOWN_TEMPLATES)})
+            json_response(self, {"ok": True, "database": DB_PATH.name, "templateCount": len(KNOWN_TEMPLATES), "csrfToken": CSRF_TOKEN})
             return
         if path == "/api/state":
             with sqlite3.connect(DB_PATH) as conn:
                 row = conn.execute("SELECT payload_json, updated_at, updated_by, reason FROM app_state WHERE key = ?", (STATE_KEY,)).fetchone()
-            payload = json.loads(row[0]) if row else None
+            payload = sanitize_state_payload(json.loads(row[0])) if row else None
             json_response(self, {"ok": True, "payload": payload, "updatedAt": row[1] if row else None, "updatedBy": row[2] if row else None, "reason": row[3] if row else None})
             return
         if path == "/api/logs":
@@ -276,6 +327,12 @@ class Handler(SimpleHTTPRequestHandler):
     def do_POST(self) -> None:
         path = urlparse(self.path).path
         try:
+            if not request_origin_is_allowed(self):
+                json_response(self, {"ok": False, "error": "origin-blocked"}, 403)
+                return
+            if not csrf_is_valid(self):
+                json_response(self, {"ok": False, "error": "csrf-token-invalid"}, 403)
+                return
             payload = read_json(self)
             if path == "/api/log":
                 db_log(payload.get("actor", "anonim"), payload.get("action", "unknown"), payload.get("detail", {}))
@@ -295,7 +352,7 @@ class Handler(SimpleHTTPRequestHandler):
                         """,
                         (
                             STATE_KEY,
-                            json.dumps(payload.get("payload") or {}, ensure_ascii=False),
+                            json.dumps(sanitize_state_payload(payload.get("payload") or {}), ensure_ascii=False),
                             now_iso(),
                             payload.get("actor", "anonim"),
                             payload.get("reason", "manual"),
@@ -308,7 +365,7 @@ class Handler(SimpleHTTPRequestHandler):
                 with sqlite3.connect(DB_PATH) as conn:
                     cursor = conn.execute(
                         "INSERT INTO snapshots (ts, actor, payload_json) VALUES (?, ?, ?)",
-                        (now_iso(), payload.get("actor", "anonim"), json.dumps(payload.get("payload") or {}, ensure_ascii=False)),
+                        (now_iso(), payload.get("actor", "anonim"), json.dumps(sanitize_state_payload(payload.get("payload") or {}), ensure_ascii=False)),
                     )
                     snapshot_id = cursor.lastrowid
                 db_log(payload.get("actor", "anonim"), "snapshot.created", {"snapshotId": snapshot_id})

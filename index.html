@@ -52,12 +52,12 @@
           <button class="credential-card" data-demo-email="admin@proje.local" type="button">
             <span>Ana Admin</span>
             <strong>admin@proje.local</strong>
-            <small>Şifre: 123456</small>
+            <small>Demo mailini doldur</small>
           </button>
           <button class="credential-card" data-demo-email="yazilim@proje.local" type="button">
             <span>Kullanıcı</span>
             <strong>yazilim@proje.local</strong>
-            <small>Şifre: 123456</small>
+            <small>Demo mailini doldur</small>
           </button>
         </div>
 
@@ -97,7 +97,7 @@
             <input
               id="registerPassword"
               type="password"
-              minlength="6"
+              minlength="8"
               autocomplete="new-password"
               required
             />
@@ -240,7 +240,7 @@
             <form id="adminUserForm" class="inline-admin-form">
               <input id="adminUserNameInput" type="text" placeholder="Ad soyad" required />
               <input id="adminUserEmailInput" type="email" placeholder="mail@ornek.com" required />
-              <input id="adminUserPasswordInput" type="text" placeholder="Şifre" value="123456" required />
+              <input id="adminUserPasswordInput" type="password" placeholder="Geçici şifre" minlength="8" required />
               <button class="primary-action small" type="submit">Kullanıcı ekle</button>
             </form>
             <div id="adminUserList" class="admin-list"></div>

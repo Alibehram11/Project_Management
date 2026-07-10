@@ -16,12 +16,8 @@ Sonra tarayıcıda `http://127.0.0.1:8765` adresini aç.
 Sadece arayüzü görmek için `index.html` dosyası doğrudan açılabilir; bu modda
 SQLite kayıt, log ve Word indirme çalışmaz.
 
-Demo hesapları:
-
-- Ana admin: `admin@proje.local` / `123456`
-- Kullanıcı: `yazilim@proje.local` / `123456`
-- Yazılım üyesi: `yazilim2@proje.local` / `123456`
-- Tasarım üyesi: `tasarim@proje.local` / `123456`
+Demo mail kartları giriş ekranında bulunur; güvenlik nedeniyle şifreler README
+ve arayüz içinde açık metin olarak yayınlanmaz.
 
 ## Bu sürümde olanlar
 
@@ -56,6 +52,8 @@ Demo hesapları:
 - Siyah-beyaz, hareketli ve tıklanabilir yeni verimlilik paneli
 - Proje içinde Atölye sekmesi
 - `Alibehram11/Atolye` kaynaklarının `integrations/atolye` altında saklanması
+- PBKDF2 tabanlı şifre hashleme ve eski açık şifreleri otomatik migrate etme
+- Same-origin CORS, CSRF token kontrolü ve backend state sanitizasyonu
 
 Not: Bitrix24 gibi kapsamlı iş yönetimi araçlarından esinlenen CRM, akış ve
 raporlama modülleri eklendi; marka, arayüz ve ürün birebir kopyalanmaz.
