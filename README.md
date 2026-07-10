@@ -1,1 +1,85 @@
-# Project_Management
+# Proje Yönetimi
+
+Mail ve şifre ile giriş yapılan, proje seçimi olan, adminlerin ekip kurup görev
+atayabildiği yerel web prototipi.
+
+## Açma
+
+Tam özellikli kullanım için:
+
+```powershell
+python server.py
+```
+
+Sonra tarayıcıda `http://127.0.0.1:8765` adresini aç.
+
+Sadece arayüzü görmek için `index.html` dosyası doğrudan açılabilir; bu modda
+SQLite kayıt, log ve Word indirme çalışmaz.
+
+Demo hesapları:
+
+- Ana admin: `admin@proje.local` / `123456`
+- Kullanıcı: `yazilim@proje.local` / `123456`
+- Yazılım üyesi: `yazilim2@proje.local` / `123456`
+- Tasarım üyesi: `tasarim@proje.local` / `123456`
+
+## Bu sürümde olanlar
+
+- Düzenlenmiş ana giriş ekranı
+- Girişten sonra önce proje seçme ekranı
+- Panel içinden proje değiştirme akışı
+- Admin panelinde proje listesi
+- Kayıt olmuş kişiyi projeye doğrudan ekleme
+- Eklenen kişiye hemen görev atayabilme
+- Ana admin, admin, ekip kaptanı ve üye rolleri
+- Ekip kaptanının kendi ekibindeki kişilere görev verebilmesi
+- Görev tesliminde not ve dosya yükleme
+- Adminin teslimi onaylaması veya düzeltme istemesi
+- Proje takvimi girişi
+- CRM fırsatları ekranı
+- Takım akışı ekranı
+- Yönetim raporları ekranı
+- Benim işlerim ekranı
+- Gelen kutusu ekranı
+- Görev önceliği, etiketi ve tahmini süre alanları
+- Görev checklist'i
+- Görev yorumları
+- `proje_yonetimi_ogrenci_belgeleri_word` klasöründeki 10 Word belgesinin site
+  içinde doldurulabilir form şablonu olarak eklenmesi
+- Ana adminin belge sorularını düzenleyebilmesi
+- Web formunda doldurulan belgeyi `.docx` olarak indirebilme
+- Verilen Word şablonlarının arka planda kontrol edilmesi
+- Admin panelinde kullanıcı ekleme, projeden çıkarma ve sistemden silme
+- SQLite veritabanına state, snapshot ve log kaydı
+- Admin için sistem logları ve müdahale araçları
+- JSON yedek indirme, veritabanından geri yükleme ve veri onarma
+
+Not: Bitrix24 gibi kapsamlı iş yönetimi araçlarından esinlenen CRM, akış ve
+raporlama modülleri eklendi; marka, arayüz ve ürün birebir kopyalanmaz.
+
+Veriler tarayıcı `localStorage` alanında tutulmaya devam eder; backend ile
+açıldığında aynı veri `app_data.sqlite3` dosyasına da kaydedilir. Word indirme
+akışı verilen şablon dosyasını doğrular ve cevapları yeni bir `.docx` dosyasına
+yazar.
+
+## İncelenen benzer uygulamalar
+
+- Asana: görev sahipliği, son tarih, proje görünümleri, özel alanlar, zaman
+  takibi, benim görevlerim ve raporlama yaklaşımından esinlenildi.
+- Trello: kart/pano mantığı, etiketler ve checklist yaklaşımından esinlenildi.
+- ClickUp: görev, doküman, dashboard, yorum/chat, otomasyon ve zaman takibi
+  yaklaşımından esinlenildi.
+
+## Test
+
+Backend kontrolü:
+
+```powershell
+python server.py --check
+```
+
+Tarayıcıda `index.html?selftest=1` açılırsa gizli self-test çalışır. Bu test
+admin görev atama, her üyeye görev atama, üye ekleme, kaptan yetkisi, normal üye
+paneli, takvim, belge cevap kaydı, belge soru düzenleme, checklist, yorum,
+benim işlerim, gelen kutusu, metrik tutarlılığı ve hatalı/boş veri akışlarını
+kontrol eder. Son doğrulamada 78 tutarlılık kontrolü geçti.

@@ -1,0 +1,612 @@
+<!doctype html>
+<html lang="tr">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Proje Yönetimi</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main id="authView" class="auth-shell">
+      <section class="auth-hero" aria-label="Giriş ekranı">
+        <div class="hero-copy">
+          <p class="eyebrow">Ekip, proje, belge, takvim</p>
+          <h1>Takımının bütün proje akışını tek yerde yönet.</h1>
+          <p>
+            Ana admin projeleri ve belge sorularını yönetir. Adminler ekip kurar,
+            kaptan atar, görev verir. Üyeler teslimlerini ve proje belgelerini
+            doldurur.
+          </p>
+        </div>
+
+        <div class="hero-grid" aria-hidden="true">
+          <article>
+            <span>01</span>
+            <strong>Proje seç</strong>
+          </article>
+          <article>
+            <span>02</span>
+            <strong>Takımı kur</strong>
+          </article>
+          <article>
+            <span>03</span>
+            <strong>Görev ata</strong>
+          </article>
+          <article>
+            <span>04</span>
+            <strong>Belge doldur</strong>
+          </article>
+        </div>
+      </section>
+
+      <section class="auth-panel" aria-label="Giriş ve kayıt">
+        <div class="brand-row">
+          <span class="brand-mark">PY</span>
+          <div>
+            <strong>Proje Yönetimi</strong>
+            <span>Yerel çalışma paneli</span>
+          </div>
+        </div>
+
+        <div class="login-cards">
+          <button class="credential-card" data-demo-email="admin@proje.local" type="button">
+            <span>Ana Admin</span>
+            <strong>admin@proje.local</strong>
+            <small>Şifre: 123456</small>
+          </button>
+          <button class="credential-card" data-demo-email="yazilim@proje.local" type="button">
+            <span>Kullanıcı</span>
+            <strong>yazilim@proje.local</strong>
+            <small>Şifre: 123456</small>
+          </button>
+        </div>
+
+        <div class="tabs" role="tablist" aria-label="Kimlik doğrulama">
+          <button id="loginTab" class="tab active" type="button">Giriş</button>
+          <button id="registerTab" class="tab" type="button">Kayıt</button>
+        </div>
+
+        <form id="loginForm" class="auth-form">
+          <label>
+            Mail
+            <input id="loginEmail" type="email" autocomplete="email" required />
+          </label>
+          <label>
+            Şifre
+            <input
+              id="loginPassword"
+              type="password"
+              autocomplete="current-password"
+              required
+            />
+          </label>
+          <button class="primary-action" type="submit">Giriş yap</button>
+        </form>
+
+        <form id="registerForm" class="auth-form hidden">
+          <label>
+            Ad Soyad
+            <input id="registerName" type="text" autocomplete="name" required />
+          </label>
+          <label>
+            Mail
+            <input id="registerEmail" type="email" autocomplete="email" required />
+          </label>
+          <label>
+            Şifre
+            <input
+              id="registerPassword"
+              type="password"
+              minlength="6"
+              autocomplete="new-password"
+              required
+            />
+          </label>
+          <button class="primary-action" type="submit">Hesap oluştur</button>
+        </form>
+
+        <p id="authMessage" class="form-message" role="status"></p>
+      </section>
+    </main>
+
+    <main id="appView" class="app-shell hidden">
+      <aside class="sidebar">
+        <div class="brand-row">
+          <span class="brand-mark">PY</span>
+          <div>
+            <strong>Proje Yönetimi</strong>
+            <span id="currentUserLabel"></span>
+          </div>
+        </div>
+
+        <div class="active-project-box">
+          <span>Aktif proje</span>
+          <strong id="activeProjectLabel">Proje seç</strong>
+          <button id="changeProjectButton" class="secondary-action small" type="button">
+            Proje değiştir
+          </button>
+        </div>
+
+        <select id="projectSelect" class="hidden" aria-label="Aktif proje"></select>
+
+        <button id="newProjectButton" class="secondary-action system-admin-only" type="button">
+          Yeni proje
+        </button>
+
+        <nav class="side-nav" aria-label="Ana menü">
+          <span class="nav-section-title">Temel</span>
+          <button class="nav-link active management-only" data-view="admin" type="button">
+            Admin Paneli
+          </button>
+          <button class="nav-link" data-view="dashboard" type="button">Panel</button>
+          <button class="nav-link" data-view="mywork" type="button">Benim İşlerim</button>
+          <button class="nav-link" data-view="tasks" type="button">Görevler</button>
+          <button class="nav-link" data-view="inbox" type="button">Gelen Kutusu</button>
+          <button class="nav-link" data-view="team" type="button">Ekip</button>
+          <button class="nav-link" data-view="docs" type="button">Belgeler</button>
+          <button class="nav-link" data-view="calendar" type="button">Takvim</button>
+          <details class="nav-tools" open>
+            <summary>Diğer araçlar</summary>
+            <button class="nav-link" data-view="crm" type="button">CRM</button>
+            <button class="nav-link" data-view="feed" type="button">Akış</button>
+            <button class="nav-link management-only" data-view="reports" type="button">
+              Raporlar
+            </button>
+          </details>
+        </nav>
+
+        <button id="logoutButton" class="ghost-action" type="button">Çıkış yap</button>
+      </aside>
+
+      <section id="projectGate" class="workspace project-gate hidden">
+        <div class="project-gate-header">
+          <div>
+            <p class="eyebrow">Önce proje seç</p>
+            <h2>Hangi projeye girmek istiyorsun?</h2>
+            <p>Birden fazla projede yer alabilirsin. Panele geçmeden önce çalışma alanını seç.</p>
+          </div>
+          <button id="gateNewProjectButton" class="primary-action system-admin-only" type="button">
+            Yeni proje
+          </button>
+        </div>
+        <div id="projectGateList" class="project-choice-grid"></div>
+      </section>
+
+      <section id="workspaceView" class="workspace">
+        <header class="topbar">
+          <div>
+            <p class="eyebrow" id="projectRoleLabel"></p>
+            <h2 id="projectTitle">Proje seç</h2>
+          </div>
+          <div class="topbar-actions">
+            <button id="openTaskButton" class="primary-action" type="button">
+              Görev ata
+            </button>
+            <button id="openMemberButton" class="secondary-action" type="button">
+              Üye ekle
+            </button>
+            <button id="openEventButton" class="secondary-action" type="button">
+              Takvime ekle
+            </button>
+          </div>
+        </header>
+
+        <section id="adminView" class="view-stack">
+          <section id="invitePanel" class="panel hidden">
+            <div class="panel-header">
+              <h3>Proje bildirimleri</h3>
+            </div>
+            <div id="inviteList" class="invite-list"></div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-header">
+              <h3>Projeler</h3>
+              <span id="projectCountLabel" class="soft-pill">0 proje</span>
+            </div>
+            <div id="adminProjectList" class="project-list"></div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-header">
+              <h3>Yetki özeti</h3>
+            </div>
+            <div class="permission-grid">
+              <article>
+                <strong>Ana admin</strong>
+                <span>Proje, ekip, görev, takvim ve belge sorularını yönetir.</span>
+              </article>
+              <article>
+                <strong>Admin</strong>
+                <span>Projeye kişi ekler, görev verir, teslim onaylar.</span>
+              </article>
+              <article>
+                <strong>Ekip kaptanı</strong>
+                <span>Kendi ekibindeki kişilere görev verebilir.</span>
+              </article>
+              <article>
+                <strong>Üye</strong>
+                <span>Görev teslim eder, proje belgelerini doldurur.</span>
+              </article>
+            </div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-header">
+              <h3>Kullanıcı yönetimi</h3>
+              <span id="adminUserCountLabel" class="soft-pill">0 kullanıcı</span>
+            </div>
+            <form id="adminUserForm" class="inline-admin-form">
+              <input id="adminUserNameInput" type="text" placeholder="Ad soyad" required />
+              <input id="adminUserEmailInput" type="email" placeholder="mail@ornek.com" required />
+              <input id="adminUserPasswordInput" type="text" placeholder="Şifre" value="123456" required />
+              <button class="primary-action small" type="submit">Kullanıcı ekle</button>
+            </form>
+            <div id="adminUserList" class="admin-list"></div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-header">
+              <h3>Sistem logları</h3>
+              <div class="panel-actions">
+                <button id="refreshLogsButton" class="secondary-action small" type="button">Yenile</button>
+                <button id="downloadStateButton" class="secondary-action small" type="button">Yedek indir</button>
+              </div>
+            </div>
+            <div id="backendStatus" class="backend-status">Backend kontrol ediliyor...</div>
+            <div id="adminLogList" class="log-list"></div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-header">
+              <h3>Müdahale araçları</h3>
+              <span class="soft-pill">Karışıklık çözme</span>
+            </div>
+            <div class="maintenance-grid">
+              <button id="saveSnapshotButton" class="secondary-action" type="button">Anlık yedek al</button>
+              <button id="reloadBackendStateButton" class="secondary-action" type="button">Veritabanından yükle</button>
+              <button id="repairStateButton" class="secondary-action" type="button">Veriyi onar</button>
+            </div>
+            <p id="maintenanceMessage" class="helper-text"></p>
+          </section>
+        </section>
+
+        <section id="dashboardView" class="view-grid hidden">
+          <article class="metric-card">
+            <span>Açık görev</span>
+            <strong id="openTasks">0</strong>
+          </article>
+          <article class="metric-card">
+            <span>Onay bekleyen</span>
+            <strong id="reviewTasks">0</strong>
+          </article>
+          <article class="metric-card">
+            <span>Tamamlanan</span>
+            <strong id="approvedTasks">0</strong>
+          </article>
+          <article class="metric-card">
+            <span>Takvim girişi</span>
+            <strong id="calendarCount">0</strong>
+          </article>
+
+          <section class="panel wide">
+            <div class="panel-header">
+              <h3>Son teslimler</h3>
+            </div>
+            <div id="recentSubmissions" class="submission-list"></div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-header">
+              <h3>Proje ekibi</h3>
+            </div>
+            <div id="teamPreview" class="team-list"></div>
+          </section>
+        </section>
+
+        <section id="tasksView" class="task-board hidden" aria-label="Görevler">
+          <div class="task-column">
+            <h3>Yapılacak</h3>
+            <div id="todoTasks" class="task-list"></div>
+          </div>
+          <div class="task-column">
+            <h3>Onay bekliyor</h3>
+            <div id="reviewTaskList" class="task-list"></div>
+          </div>
+          <div class="task-column">
+            <h3>Onaylandı</h3>
+            <div id="approvedTaskList" class="task-list"></div>
+          </div>
+        </section>
+
+        <section id="myWorkView" class="view-stack hidden">
+          <section class="panel">
+            <div class="panel-header">
+              <h3>Benim işlerim</h3>
+              <span id="myWorkCount" class="soft-pill">0 görev</span>
+            </div>
+            <div id="myWorkList" class="task-list"></div>
+          </section>
+        </section>
+
+        <section id="inboxView" class="view-stack hidden">
+          <section class="panel">
+            <div class="panel-header">
+              <h3>Gelen kutusu</h3>
+              <span class="soft-pill">Yorumlar ve teslimler</span>
+            </div>
+            <div id="inboxList" class="feed-list"></div>
+          </section>
+        </section>
+
+        <section id="teamView" class="panel hidden">
+          <div class="panel-header">
+            <h3>Ekip ve roller</h3>
+          </div>
+          <div id="teamFullList" class="team-list"></div>
+        </section>
+
+        <section id="docsView" class="view-stack hidden">
+          <section class="panel">
+            <div class="panel-header">
+              <h3>Öğrenci proje belgeleri</h3>
+              <button id="openTemplateEditorButton" class="secondary-action small" type="button">
+                Soruları düzenle
+              </button>
+            </div>
+            <div id="documentList" class="document-grid"></div>
+          </section>
+          <section class="panel">
+            <div class="panel-header">
+              <h3>Seçili belge</h3>
+              <div class="panel-actions">
+                <button id="checkTemplateButton" class="secondary-action small" type="button">Şablonu kontrol et</button>
+                <button id="exportDocumentButton" class="primary-action small" type="button">Word indir</button>
+              </div>
+            </div>
+            <div class="document-tools">
+              <label>
+                Word şablonu yükle
+                <input id="templateUploadInput" type="file" accept=".docx" />
+              </label>
+              <p id="documentBackendMessage" class="helper-text"></p>
+            </div>
+            <form id="documentForm" class="document-form"></form>
+          </section>
+        </section>
+
+        <section id="calendarView" class="panel hidden">
+          <div class="panel-header">
+            <h3>Proje takvimi</h3>
+          </div>
+          <div id="calendarList" class="calendar-list"></div>
+        </section>
+
+        <section id="crmView" class="view-stack hidden">
+          <section class="panel">
+            <div class="panel-header">
+              <h3>CRM fırsatları</h3>
+              <span class="soft-pill">Özgün Bitrix24 benzeri modül</span>
+            </div>
+            <div id="crmList" class="business-grid"></div>
+          </section>
+        </section>
+
+        <section id="feedView" class="view-stack hidden">
+          <section class="panel">
+            <div class="panel-header">
+              <h3>Takım akışı</h3>
+            </div>
+            <div id="feedList" class="feed-list"></div>
+          </section>
+        </section>
+
+        <section id="reportsView" class="view-stack hidden">
+          <section class="panel">
+            <div class="panel-header">
+              <h3>Yönetim raporları</h3>
+            </div>
+            <div id="reportList" class="business-grid"></div>
+          </section>
+        </section>
+      </section>
+    </main>
+
+    <dialog id="taskDialog">
+      <form id="taskForm" class="modal-form">
+        <div class="modal-header">
+          <h3>Görev ata</h3>
+          <button class="icon-button" data-close-dialog type="button" aria-label="Kapat">
+            ×
+          </button>
+        </div>
+        <label>
+          Görev başlığı
+          <input id="taskTitleInput" type="text" required />
+        </label>
+        <label>
+          Açıklama
+          <textarea id="taskDescriptionInput" rows="4" required></textarea>
+        </label>
+        <div class="form-grid-two">
+          <label>
+            Sorumlu kişi
+            <select id="taskAssigneeInput" required></select>
+          </label>
+          <label>
+            Teslim tarihi
+            <input id="taskDueInput" type="date" />
+          </label>
+        </div>
+        <div class="form-grid-three">
+          <label>
+            Öncelik
+            <select id="taskPriorityInput">
+              <option value="normal">Normal</option>
+              <option value="high">Yüksek</option>
+              <option value="urgent">Acil</option>
+              <option value="low">Düşük</option>
+            </select>
+          </label>
+          <label>
+            Etiket
+            <input id="taskLabelInput" type="text" placeholder="Yazılım, Tasarım..." />
+          </label>
+          <label>
+            Tahmini saat
+            <input id="taskEstimateInput" type="number" min="0" step="0.5" />
+          </label>
+        </div>
+        <label>
+          Checklist
+          <textarea
+            id="taskChecklistInput"
+            rows="4"
+            placeholder="Her satır bir alt görev"
+          ></textarea>
+        </label>
+        <button class="primary-action" type="submit">Görevi oluştur</button>
+      </form>
+    </dialog>
+
+    <dialog id="memberDialog">
+      <form id="memberForm" class="modal-form">
+        <div class="modal-header">
+          <h3>Projeye üye ekle</h3>
+          <button class="icon-button" data-close-dialog type="button" aria-label="Kapat">
+            ×
+          </button>
+        </div>
+        <label>
+          Daha önce kayıt olmuş kişi
+          <select id="memberSelect" required></select>
+        </label>
+        <div class="form-grid-two">
+          <label>
+            Rol
+            <select id="memberRoleSelect">
+              <option value="member">Üye</option>
+              <option value="lead">Ekip kaptanı</option>
+              <option value="admin">Admin</option>
+            </select>
+          </label>
+          <label>
+            Ekip
+            <select id="memberTeamSelect">
+              <option value="Yazılım">Yazılım</option>
+              <option value="Tasarım">Tasarım</option>
+              <option value="Mekanik">Mekanik</option>
+              <option value="Elektronik">Elektronik</option>
+              <option value="Yönetim">Yönetim</option>
+            </select>
+          </label>
+        </div>
+        <label>
+          Not
+          <textarea id="memberInviteNote" rows="3"></textarea>
+        </label>
+        <button id="memberSubmitButton" class="primary-action" type="submit">Projeye ekle</button>
+      </form>
+    </dialog>
+
+    <dialog id="projectDialog">
+      <form id="projectForm" class="modal-form">
+        <div class="modal-header">
+          <h3>Yeni proje</h3>
+          <button class="icon-button" data-close-dialog type="button" aria-label="Kapat">
+            ×
+          </button>
+        </div>
+        <label>
+          Proje adı
+          <input id="projectNameInput" type="text" required />
+        </label>
+        <label>
+          Kısa açıklama
+          <textarea id="projectDescriptionInput" rows="3"></textarea>
+        </label>
+        <button class="primary-action" type="submit">Projeyi oluştur</button>
+      </form>
+    </dialog>
+
+    <dialog id="eventDialog">
+      <form id="eventForm" class="modal-form">
+        <div class="modal-header">
+          <h3>Takvim girişi</h3>
+          <button class="icon-button" data-close-dialog type="button" aria-label="Kapat">
+            ×
+          </button>
+        </div>
+        <label>
+          Başlık
+          <input id="eventTitleInput" type="text" required />
+        </label>
+        <div class="form-grid-two">
+          <label>
+            Tarih
+            <input id="eventDateInput" type="date" required />
+          </label>
+          <label>
+            Tür
+            <select id="eventTypeInput">
+              <option value="Toplantı">Toplantı</option>
+              <option value="Teslim">Teslim</option>
+              <option value="Test">Test</option>
+              <option value="Yarışma">Yarışma</option>
+              <option value="Not">Not</option>
+            </select>
+          </label>
+        </div>
+        <label>
+          Açıklama
+          <textarea id="eventDescriptionInput" rows="3"></textarea>
+        </label>
+        <button class="primary-action" type="submit">Takvime ekle</button>
+      </form>
+    </dialog>
+
+    <dialog id="templateDialog">
+      <form id="templateForm" class="modal-form">
+        <div class="modal-header">
+          <h3>Belge sorularını düzenle</h3>
+          <button class="icon-button" data-close-dialog type="button" aria-label="Kapat">
+            ×
+          </button>
+        </div>
+        <label>
+          Belge
+          <select id="templateSelect"></select>
+        </label>
+        <label>
+          Sorular
+          <textarea id="templateQuestionsInput" rows="9"></textarea>
+        </label>
+        <p class="helper-text">Her satır bir soru/alan olarak kaydedilir.</p>
+        <button class="primary-action" type="submit">Soruları kaydet</button>
+      </form>
+    </dialog>
+
+    <template id="taskCardTemplate">
+      <article class="task-card">
+        <div class="task-card-header">
+          <strong data-task-title></strong>
+          <span data-task-status class="status-pill"></span>
+        </div>
+        <p data-task-description></p>
+        <div class="task-meta">
+          <span data-task-assignee></span>
+          <span data-task-due></span>
+          <span data-task-team></span>
+          <span data-task-priority></span>
+          <span data-task-label></span>
+          <span data-task-estimate></span>
+        </div>
+        <div data-checklist-area class="checklist-area"></div>
+        <div data-submission-area class="submission-area"></div>
+        <div data-comment-area class="comment-area"></div>
+      </article>
+    </template>
+
+    <script src="app.js"></script>
+  </body>
+</html>
