@@ -518,6 +518,7 @@ function createSeedData() {
         usageReason: "Servo motor hareket testi",
         status: "Beklemede",
         createdAt: new Date().toISOString(),
+        createdBy: ownerId,
         items: [{ productId: "servo-motor", quantity: 2 }],
       },
     ],
@@ -671,6 +672,9 @@ function normalizeState(value) {
       ? request.status
       : "Beklemede",
     createdAt: request.createdAt || new Date().toISOString(),
+    createdBy: normalized.users.some((user) => user.id === request.createdBy)
+      ? request.createdBy
+      : normalized.projects[0]?.ownerId || normalized.users[0]?.id || "",
     items: Array.isArray(request.items) ? request.items : [],
   }));
   localStorage.setItem(STORAGE_KEY, JSON.stringify(sanitizedStateForStorage(normalized)));
@@ -2269,13 +2273,25 @@ function productStock(productId) {
   return Math.max(0, Number(product?.quantity || 0) - used);
 }
 
+function canViewAtolyeRequest(request) {
+  if (isProjectManager()) {
+    return true;
+  }
+  return Boolean(currentUser() && request.createdBy === session.userId);
+}
+
+function visibleAtolyeRequests() {
+  return state.atolyeRequests.filter((request) => canViewAtolyeRequest(request));
+}
+
 function renderAtolye(container, options = {}) {
   if (!container) {
     return;
   }
-  const pending = state.atolyeRequests.filter((request) => request.status === "Beklemede");
-  const approved = state.atolyeRequests.filter((request) => request.status === "Onaylandı");
-  const rejected = state.atolyeRequests.filter((request) => request.status === "Reddedildi");
+  const visibleRequests = visibleAtolyeRequests();
+  const pending = visibleRequests.filter((request) => request.status === "Beklemede");
+  const approved = visibleRequests.filter((request) => request.status === "Onaylandı");
+  const rejected = visibleRequests.filter((request) => request.status === "Reddedildi");
   const lowStock = ATOLYE_PRODUCTS.filter((product) => productStock(product.id) <= Math.max(2, product.quantity * 0.2));
   const canModerate = Boolean(currentUser() && isProjectManager());
 
@@ -2347,7 +2363,7 @@ function renderAtolye(container, options = {}) {
     <section class="atolye-panel">
       <div class="panel-header">
         <h3>Talep akışı</h3>
-        <span class="soft-pill">${state.atolyeRequests.length} kayıt</span>
+        <span class="soft-pill">${visibleRequests.length} kayıt</span>
       </div>
       <div class="atolye-request-list"></div>
     </section>
@@ -2403,11 +2419,11 @@ function renderAtolye(container, options = {}) {
   });
 
   const requestList = container.querySelector(".atolye-request-list");
-  if (state.atolyeRequests.length === 0) {
-    requestList.append(emptyState("Henüz talep yok."));
+  if (visibleRequests.length === 0) {
+    requestList.append(emptyState(canModerate ? "Henüz talep yok." : "Henüz sana ait talep yok."));
     return;
   }
-  state.atolyeRequests
+  visibleRequests
     .slice()
     .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
     .forEach((request) => {
@@ -2457,6 +2473,7 @@ function createAtolyeRequest(input) {
   const product = ATOLYE_PRODUCTS.find((item) => item.id === input.productId);
   const quantity = Number(input.quantity || 0);
   if (
+    !currentUser() ||
     !product ||
     quantity < 1 ||
     quantity > productStock(product.id) ||
@@ -2476,6 +2493,7 @@ function createAtolyeRequest(input) {
     usageReason: String(input.usageReason).trim(),
     status: "Beklemede",
     createdAt: new Date().toISOString(),
+    createdBy: session.userId,
     items: [{ productId: product.id, quantity }],
   });
   saveState();
@@ -3692,6 +3710,16 @@ async function runSelfTest() {
     );
     check(state.atolyeRequests.length === requestBefore + 1, "Atolye talebi state icinde tutuluyor");
     const selfTestRequest = state.atolyeRequests.at(-1);
+    const adminSession = { ...session };
+    const normalUser = state.users.find((user) => user.email === "tasarim@proje.local");
+    session.userId = normalUser.id;
+    saveSession();
+    check(
+      !visibleAtolyeRequests().some((request) => request.id === selfTestRequest.id),
+      "Normal uye baskasinin atolye talebini goremiyor",
+    );
+    session = adminSession;
+    saveSession();
     check(updateAtolyeRequestStatus(selfTestRequest.id, "Onaylandı") === true, "Admin atolye talebini onaylayabiliyor");
     check(selfTestRequest.status === "Onaylandı", "Atolye talep durumu onaylandi olarak guncelleniyor");
 

@@ -22,6 +22,18 @@ app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///inventory.db'
 db.init_app(app)
 
 ADMIN_PASSWORD = get_required_env('ATOLYE_ADMIN_PASSWORD')
+MAX_TEXT_LENGTH = 500
+
+
+def limited_text(value, limit=MAX_TEXT_LENGTH):
+    return str(value or '').strip()[:limit]
+
+
+def form_int(name, default=0):
+    try:
+        return int(request.form.get(name, default))
+    except (TypeError, ValueError):
+        return default
 
 
 @app.route('/')
@@ -32,15 +44,19 @@ def index():
 
 @app.route('/search', methods=['GET'])
 def search():
-    query = request.args.get('q', '')
+    query = limited_text(request.args.get('q', ''), 80)
     products = Product.query.filter(Product.name.contains(query)).all()
     return render_template('index.html', products=products, query=query)
 
 
 @app.route('/add_to_cart', methods=['POST'])
 def add_to_cart():
-    product_id = int(request.form['product_id'])
-    quantity = int(request.form['quantity'])
+    product_id = form_int('product_id')
+    quantity = form_int('quantity')
+    product = db.session.get(Product, product_id)
+    if not product or quantity < 1 or quantity > product.quantity:
+        flash('Gecersiz urun veya adet.')
+        return redirect(url_for('index'))
     if 'cart' not in session:
         session['cart'] = {}
     session['cart'][str(product_id)] = quantity
@@ -54,19 +70,27 @@ def cart():
     cart_items = []
     if 'cart' in session:
         for pid, qty in session['cart'].items():
-            product = db.session.get(Product, int(pid))
+            try:
+                product_id = int(pid)
+                quantity = int(qty)
+            except (TypeError, ValueError):
+                continue
+            product = db.session.get(Product, product_id)
             if product:
-                cart_items.append({'product': product, 'quantity': qty})
+                cart_items.append({'product': product, 'quantity': quantity})
     return render_template('cart.html', cart_items=cart_items)
 
 
 @app.route('/request_form', methods=['GET', 'POST'])
 def request_form():
     if request.method == 'POST':
-        student_name = request.form['student_name']
-        student_id = request.form['student_id']
-        project_purpose = request.form['project_purpose']
-        usage_reason = request.form['usage_reason']
+        student_name = limited_text(request.form.get('student_name'), 100)
+        student_id = limited_text(request.form.get('student_id'), 20)
+        project_purpose = limited_text(request.form.get('project_purpose'))
+        usage_reason = limited_text(request.form.get('usage_reason'))
+        if not all([student_name, student_id, project_purpose, usage_reason]):
+            flash('Tum alanlari doldurun.')
+            return redirect(url_for('request_form'))
 
         req = Request(student_name=student_name, student_id=student_id,
                       project_purpose=project_purpose, usage_reason=usage_reason)
@@ -74,7 +98,12 @@ def request_form():
         db.session.flush()
 
         for pid, qty in session.get('cart', {}).items():
-            item = RequestItem(request_id=req.id, product_id=int(pid), quantity=qty)
+            try:
+                product_id = int(pid)
+                quantity = int(qty)
+            except (TypeError, ValueError):
+                continue
+            item = RequestItem(request_id=req.id, product_id=product_id, quantity=quantity)
             db.session.add(item)
 
         db.session.commit()

@@ -27,6 +27,13 @@ JSON_MIME = "application/json; charset=utf-8"
 DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 BLOCKED_STATIC_PATHS = {"/app_data.sqlite3", "/server.py", "/wsgi.py"}
 _WSGI_READY = False
+SECURITY_HEADERS = [
+    ("X-Content-Type-Options", "nosniff"),
+    ("X-Frame-Options", "DENY"),
+    ("Referrer-Policy", "same-origin"),
+    ("Permissions-Policy", "camera=(), microphone=(), geolocation=()"),
+    ("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; form-action 'self'; base-uri 'self'"),
+]
 
 KNOWN_TEMPLATES = {
     "fr01": "01_FR-01_Proje_Tanim_Karti.docx",
@@ -46,9 +53,17 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def connect_db() -> sqlite3.Connection:
+    conn = sqlite3.connect(DB_PATH, timeout=10)
+    conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("PRAGMA busy_timeout = 5000")
+    return conn
+
+
 def init_db() -> None:
     UPLOAD_DIR.mkdir(exist_ok=True)
-    with sqlite3.connect(DB_PATH) as conn:
+    with connect_db() as conn:
+        conn.execute("PRAGMA journal_mode = WAL")
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS app_state (
@@ -106,7 +121,7 @@ def init_db() -> None:
 
 
 def db_log(actor: str, action: str, detail: object | None = None) -> None:
-    with sqlite3.connect(DB_PATH) as conn:
+    with connect_db() as conn:
         conn.execute(
             "INSERT INTO logs (ts, actor, action, detail_json) VALUES (?, ?, ?, ?)",
             (now_iso(), actor or "anonim", action, json.dumps(detail or {}, ensure_ascii=False)),
@@ -126,13 +141,19 @@ def json_response(handler: SimpleHTTPRequestHandler, payload: object, status: in
 
 
 def read_json(handler: SimpleHTTPRequestHandler) -> dict:
+    content_type = handler.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
+    if content_type and content_type != "application/json":
+        raise ValueError("content-type-json-required")
     length = int(handler.headers.get("Content-Length", "0") or "0")
     if length > MAX_UPLOAD_BYTES:
         raise ValueError("İstek çok büyük.")
     raw = handler.rfile.read(length)
     if not raw:
         return {}
-    return json.loads(raw.decode("utf-8"))
+    payload = json.loads(raw.decode("utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError("json-object-required")
+    return payload
 
 
 def template_path(template_id: str | None, file_name: str | None) -> Path | None:
@@ -309,6 +330,8 @@ class Handler(SimpleHTTPRequestHandler):
             self.send_header("Vary", "Origin")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type, X-CSRF-Token")
+        for name, value in SECURITY_HEADERS:
+            self.send_header(name, value)
         super().end_headers()
 
     def do_OPTIONS(self) -> None:
@@ -324,13 +347,13 @@ class Handler(SimpleHTTPRequestHandler):
             json_response(self, {"ok": True, "database": DB_PATH.name, "templateCount": len(KNOWN_TEMPLATES), "csrfToken": CSRF_TOKEN})
             return
         if path == "/api/state":
-            with sqlite3.connect(DB_PATH) as conn:
+            with connect_db() as conn:
                 row = conn.execute("SELECT payload_json, updated_at, updated_by, reason FROM app_state WHERE key = ?", (STATE_KEY,)).fetchone()
             payload = sanitize_state_payload(json.loads(row[0])) if row else None
             json_response(self, {"ok": True, "payload": payload, "updatedAt": row[1] if row else None, "updatedBy": row[2] if row else None, "reason": row[3] if row else None})
             return
         if path == "/api/logs":
-            with sqlite3.connect(DB_PATH) as conn:
+            with connect_db() as conn:
                 rows = conn.execute("SELECT id, ts, actor, action, detail_json FROM logs ORDER BY id DESC LIMIT 100").fetchall()
             logs = [
                 {"id": row[0], "ts": row[1], "actor": row[2], "action": row[3], "detail": json.loads(row[4] or "{}")}
@@ -339,7 +362,7 @@ class Handler(SimpleHTTPRequestHandler):
             json_response(self, {"ok": True, "logs": logs})
             return
         if path == "/api/snapshots":
-            with sqlite3.connect(DB_PATH) as conn:
+            with connect_db() as conn:
                 rows = conn.execute("SELECT id, ts, actor FROM snapshots ORDER BY id DESC LIMIT 50").fetchall()
             json_response(self, {"ok": True, "snapshots": [{"id": row[0], "ts": row[1], "actor": row[2]} for row in rows]})
             return
@@ -363,7 +386,7 @@ class Handler(SimpleHTTPRequestHandler):
                 json_response(self, {"ok": True})
                 return
             if path == "/api/state":
-                with sqlite3.connect(DB_PATH) as conn:
+                with connect_db() as conn:
                     conn.execute(
                         """
                         INSERT INTO app_state (key, payload_json, updated_at, updated_by, reason)
@@ -386,7 +409,7 @@ class Handler(SimpleHTTPRequestHandler):
                 json_response(self, {"ok": True})
                 return
             if path == "/api/snapshot":
-                with sqlite3.connect(DB_PATH) as conn:
+                with connect_db() as conn:
                     cursor = conn.execute(
                         "INSERT INTO snapshots (ts, actor, payload_json) VALUES (?, ?, ?)",
                         (now_iso(), payload.get("actor", "anonim"), json.dumps(sanitize_state_payload(payload.get("payload") or {}), ensure_ascii=False)),
@@ -424,7 +447,7 @@ class Handler(SimpleHTTPRequestHandler):
                     json_response(self, {"ok": False, "error": "invalid-docx"}, 400)
                     return
                 digest = file_sha256(target)
-                with sqlite3.connect(DB_PATH) as conn:
+                with connect_db() as conn:
                     conn.execute(
                         "INSERT INTO uploaded_templates (file_name, stored_path, sha256, uploaded_at, uploaded_by) VALUES (?, ?, ?, ?, ?)",
                         (file_name, str(target), digest, now_iso(), payload.get("actor", "anonim")),
@@ -445,6 +468,8 @@ class Handler(SimpleHTTPRequestHandler):
                 self.wfile.write(data)
                 return
             json_response(self, {"ok": False, "error": "not-found"}, 404)
+        except ValueError as exc:
+            json_response(self, {"ok": False, "error": str(exc)}, 400)
         except Exception as exc:  # Keep local server debuggable for the admin screen.
             json_response(self, {"ok": False, "error": str(exc)}, 500)
 
@@ -481,6 +506,7 @@ def wsgi_headers(environ: dict, content_type: str, length: int | None = None, ex
             ("Access-Control-Allow-Headers", "Content-Type, X-CSRF-Token"),
         ]
     )
+    headers.extend(SECURITY_HEADERS)
     if extra:
         headers.extend(extra)
     return headers
@@ -493,11 +519,19 @@ def wsgi_json(environ: dict, start_response, payload: object, status: int = 200)
 
 
 def wsgi_read_json(environ: dict) -> dict:
+    content_type = (environ.get("CONTENT_TYPE") or "").split(";", 1)[0].strip().lower()
+    if content_type and content_type != "application/json":
+        raise ValueError("content-type-json-required")
     length = int(environ.get("CONTENT_LENGTH") or "0")
     if length > MAX_UPLOAD_BYTES:
         raise ValueError("Istek cok buyuk.")
     raw = environ["wsgi.input"].read(length) if length else b""
-    return json.loads(raw.decode("utf-8")) if raw else {}
+    if not raw:
+        return {}
+    payload = json.loads(raw.decode("utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError("json-object-required")
+    return payload
 
 
 def wsgi_origin_is_allowed(environ: dict) -> bool:
@@ -542,12 +576,12 @@ def application(environ, start_response):
             if path == "/api/health":
                 return wsgi_json(environ, start_response, {"ok": True, "database": DB_PATH.name, "templateCount": len(KNOWN_TEMPLATES), "csrfToken": CSRF_TOKEN})
             if path == "/api/state":
-                with sqlite3.connect(DB_PATH) as conn:
+                with connect_db() as conn:
                     row = conn.execute("SELECT payload_json, updated_at, updated_by, reason FROM app_state WHERE key = ?", (STATE_KEY,)).fetchone()
                 payload = sanitize_state_payload(json.loads(row[0])) if row else None
                 return wsgi_json(environ, start_response, {"ok": True, "payload": payload, "updatedAt": row[1] if row else None, "updatedBy": row[2] if row else None, "reason": row[3] if row else None})
             if path == "/api/logs":
-                with sqlite3.connect(DB_PATH) as conn:
+                with connect_db() as conn:
                     rows = conn.execute("SELECT id, ts, actor, action, detail_json FROM logs ORDER BY id DESC LIMIT 100").fetchall()
                 logs = [
                     {"id": row[0], "ts": row[1], "actor": row[2], "action": row[3], "detail": json.loads(row[4] or "{}")}
@@ -555,7 +589,7 @@ def application(environ, start_response):
                 ]
                 return wsgi_json(environ, start_response, {"ok": True, "logs": logs})
             if path == "/api/snapshots":
-                with sqlite3.connect(DB_PATH) as conn:
+                with connect_db() as conn:
                     rows = conn.execute("SELECT id, ts, actor FROM snapshots ORDER BY id DESC LIMIT 50").fetchall()
                 return wsgi_json(environ, start_response, {"ok": True, "snapshots": [{"id": row[0], "ts": row[1], "actor": row[2]} for row in rows]})
             return wsgi_static(environ, start_response, path)
@@ -569,7 +603,7 @@ def application(environ, start_response):
                 db_log(payload.get("actor", "anonim"), payload.get("action", "unknown"), payload.get("detail", {}))
                 return wsgi_json(environ, start_response, {"ok": True})
             if path == "/api/state":
-                with sqlite3.connect(DB_PATH) as conn:
+                with connect_db() as conn:
                     conn.execute(
                         """
                         INSERT INTO app_state (key, payload_json, updated_at, updated_by, reason)
@@ -591,7 +625,7 @@ def application(environ, start_response):
                 db_log(payload.get("actor", "anonim"), "state.saved", {"reason": payload.get("reason", "manual")})
                 return wsgi_json(environ, start_response, {"ok": True})
             if path == "/api/snapshot":
-                with sqlite3.connect(DB_PATH) as conn:
+                with connect_db() as conn:
                     cursor = conn.execute(
                         "INSERT INTO snapshots (ts, actor, payload_json) VALUES (?, ?, ?)",
                         (now_iso(), payload.get("actor", "anonim"), json.dumps(sanitize_state_payload(payload.get("payload") or {}), ensure_ascii=False)),
@@ -625,7 +659,7 @@ def application(environ, start_response):
                     target.unlink(missing_ok=True)
                     return wsgi_json(environ, start_response, {"ok": False, "error": "invalid-docx"}, 400)
                 digest = file_sha256(target)
-                with sqlite3.connect(DB_PATH) as conn:
+                with connect_db() as conn:
                     conn.execute(
                         "INSERT INTO uploaded_templates (file_name, stored_path, sha256, uploaded_at, uploaded_by) VALUES (?, ?, ?, ?, ?)",
                         (file_name, str(target), digest, now_iso(), payload.get("actor", "anonim")),
@@ -642,6 +676,8 @@ def application(environ, start_response):
                 return [data]
             return wsgi_json(environ, start_response, {"ok": False, "error": "not-found"}, 404)
         return wsgi_json(environ, start_response, {"ok": False, "error": "method-not-allowed"}, 405)
+    except ValueError as exc:
+        return wsgi_json(environ, start_response, {"ok": False, "error": str(exc)}, 400)
     except Exception as exc:
         return wsgi_json(environ, start_response, {"ok": False, "error": str(exc)}, 500)
 
