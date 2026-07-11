@@ -26,6 +26,15 @@ CSRF_TOKEN = secrets.token_urlsafe(32)
 JSON_MIME = "application/json; charset=utf-8"
 DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 BLOCKED_STATIC_PATHS = {"/app_data.sqlite3", "/server.py", "/wsgi.py"}
+ALLOWED_STATIC_PATHS = {
+    "",
+    "index.html",
+    "app.js",
+    "styles.css",
+    "static/app.js",
+    "static/styles.css",
+    "templates/index.html",
+}
 _WSGI_READY = False
 SECURITY_HEADERS = [
     ("X-Content-Type-Options", "nosniff"),
@@ -140,13 +149,20 @@ def json_response(handler: SimpleHTTPRequestHandler, payload: object, status: in
     handler.wfile.write(data)
 
 
+def parse_content_length(value: str | None) -> int:
+    length = int(value or "0")
+    if length < 0:
+        raise ValueError("content-length-invalid")
+    if length > MAX_UPLOAD_BYTES:
+        raise ValueError("request-too-large")
+    return length
+
+
 def read_json(handler: SimpleHTTPRequestHandler) -> dict:
     content_type = handler.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
-    if content_type and content_type != "application/json":
+    length = parse_content_length(handler.headers.get("Content-Length"))
+    if length and content_type != "application/json":
         raise ValueError("content-type-json-required")
-    length = int(handler.headers.get("Content-Length", "0") or "0")
-    if length > MAX_UPLOAD_BYTES:
-        raise ValueError("İstek çok büyük.")
     raw = handler.rfile.read(length)
     if not raw:
         return {}
@@ -302,9 +318,17 @@ def static_file_path(request_path: str) -> Path | None:
     if path in BLOCKED_STATIC_PATHS or path.startswith("/uploaded_templates/"):
         return None
     clean = unquote(path).lstrip("/")
+    if clean not in ALLOWED_STATIC_PATHS:
+        return None
     candidates = [ROOT / clean] if clean else [ROOT / "index.html", ROOT / "templates" / "index.html"]
     if clean in {"app.js", "styles.css"}:
         candidates.append(ROOT / "static" / clean)
+    if clean == "static/app.js":
+        candidates.append(ROOT / "app.js")
+    if clean == "static/styles.css":
+        candidates.append(ROOT / "styles.css")
+    if clean == "templates/index.html":
+        candidates.append(ROOT / "index.html")
 
     for candidate in candidates:
         resolved = candidate.resolve()
@@ -314,7 +338,7 @@ def static_file_path(request_path: str) -> Path | None:
             resolved = resolved / "index.html"
         if resolved.exists():
             return resolved
-    return candidates[-1].resolve()
+    return None
 
 
 class Handler(SimpleHTTPRequestHandler):
@@ -520,11 +544,9 @@ def wsgi_json(environ: dict, start_response, payload: object, status: int = 200)
 
 def wsgi_read_json(environ: dict) -> dict:
     content_type = (environ.get("CONTENT_TYPE") or "").split(";", 1)[0].strip().lower()
-    if content_type and content_type != "application/json":
+    length = parse_content_length(environ.get("CONTENT_LENGTH"))
+    if length and content_type != "application/json":
         raise ValueError("content-type-json-required")
-    length = int(environ.get("CONTENT_LENGTH") or "0")
-    if length > MAX_UPLOAD_BYTES:
-        raise ValueError("Istek cok buyuk.")
     raw = environ["wsgi.input"].read(length) if length else b""
     if not raw:
         return {}
