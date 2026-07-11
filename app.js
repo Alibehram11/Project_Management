@@ -259,6 +259,8 @@ let backendOnline = false;
 let stateSyncTimer = 0;
 let latestLogs = [];
 let csrfToken = "";
+let apiAuthToken = session.apiToken || "";
+let apiCsrfToken = session.apiCsrfToken || "";
 
 function uid() {
   if (window.crypto?.randomUUID) {
@@ -725,14 +727,12 @@ async function apiJson(path, options = {}) {
 
   try {
     const method = (options.method || "GET").toUpperCase();
-    if (method !== "GET" && !csrfToken && path !== "/api/health") {
-      const health = await apiJson("/api/health");
-      csrfToken = health?.csrfToken || "";
-    }
+    const isLogin = path === "/api/auth/login";
     const response = await fetch(path, {
       headers: {
         "Content-Type": "application/json",
-        ...(csrfToken && method !== "GET" ? { "X-CSRF-Token": csrfToken } : {}),
+        ...(apiAuthToken && !isLogin ? { Authorization: `Bearer ${apiAuthToken}` } : {}),
+        ...(apiCsrfToken && method !== "GET" && !isLogin ? { "X-CSRF-Token": apiCsrfToken } : {}),
         ...(options.headers || {}),
       },
       ...options,
@@ -750,8 +750,26 @@ async function apiJson(path, options = {}) {
   }
 }
 
+async function apiLogin(email, password) {
+  const result = await apiJson("/api/auth/login", {
+    method: "POST",
+    body: JSON.stringify({ email, password }),
+  });
+  if (!result?.ok) {
+    return false;
+  }
+  apiAuthToken = result.token || "";
+  apiCsrfToken = result.csrfToken || "";
+  csrfToken = apiCsrfToken;
+  session.apiToken = apiAuthToken;
+  session.apiCsrfToken = apiCsrfToken;
+  session.apiRole = result.user?.role || "member";
+  saveSession();
+  return true;
+}
+
 function queueStateSync(reason) {
-  if (!canUseBackend() || SELF_TEST_MODE) {
+  if (!canUseBackend() || SELF_TEST_MODE || !apiAuthToken || !isProjectManager()) {
     return false;
   }
   clearTimeout(stateSyncTimer);
@@ -790,17 +808,32 @@ async function bootstrapBackend() {
   if (!health?.ok) {
     return;
   }
-  csrfToken = health.csrfToken || csrfToken;
+  backendOnline = true;
+  updateBackendStatus(apiAuthToken ? undefined : "Backend hazır: kayıt ve log için giriş yap.");
+}
 
+async function loadBackendStateAfterLogin() {
+  if (!apiAuthToken) {
+    return false;
+  }
   const saved = await apiJson("/api/state");
   if (saved?.payload) {
+    const currentEmail = currentUser()?.email || "";
     state = normalizeState(mergeAuthFields(saved.payload, state));
+    const backendUser = state.users.find((user) => user.email.toLowerCase() === currentEmail.toLowerCase());
+    if (backendUser) {
+      session.userId = backendUser.id;
+      saveSession();
+    }
     localStorage.setItem(STORAGE_KEY, JSON.stringify(sanitizedStateForStorage(state)));
     render();
-  } else {
+  } else if (isProjectManager()) {
     await syncStateToBackend("initial-browser-state");
   }
-  await refreshLogs();
+  if (isProjectManager()) {
+    await refreshLogs();
+  }
+  return true;
 }
 
 function saveState() {
@@ -949,6 +982,8 @@ async function signIn(email, password) {
     documentId: "fr01",
   };
   saveSession();
+  await apiLogin(user.email, password);
+  await loadBackendStateAfterLogin();
   logAction("auth.login", { actor: user.email });
   render();
   return true;
@@ -979,6 +1014,7 @@ async function registerUser(name, email, password) {
   saveState();
   session = { userId: user.id, projectId: null, view: "project-select", documentId: "fr01" };
   saveSession();
+  await apiLogin(user.email, password);
   logAction("auth.register", { actor: user.email });
   render();
   return true;
@@ -986,6 +1022,9 @@ async function registerUser(name, email, password) {
 
 function logout() {
   logAction("auth.logout", { actor: currentUser()?.email || "anonim" });
+  apiAuthToken = "";
+  apiCsrfToken = "";
+  csrfToken = "";
   session = { userId: null, projectId: null, view: "admin", documentId: "fr01" };
   saveSession();
   render();
@@ -1302,6 +1341,11 @@ function summarizeLogDetail(detail) {
 }
 
 async function refreshLogs() {
+  if (!apiAuthToken || !isProjectManager()) {
+    latestLogs = [];
+    renderAdminLogs();
+    return;
+  }
   const result = await apiJson("/api/logs");
   latestLogs = Array.isArray(result?.logs) ? result.logs : latestLogs;
   renderAdminLogs();
@@ -2167,15 +2211,15 @@ async function exportSelectedDocument() {
     if (!canUseBackend() || SELF_TEST_MODE) {
       throw new Error("Backend kapalı");
     }
-    if (!csrfToken) {
-      const health = await apiJson("/api/health");
-      csrfToken = health?.csrfToken || "";
+    if (!apiAuthToken || !apiCsrfToken) {
+      throw new Error("Backend oturumu yok");
     }
     const response = await fetch("/api/docx/export", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        ...(csrfToken ? { "X-CSRF-Token": csrfToken } : {}),
+        Authorization: `Bearer ${apiAuthToken}`,
+        "X-CSRF-Token": apiCsrfToken,
       },
       body: JSON.stringify(payload),
     });
@@ -2207,6 +2251,10 @@ async function exportSelectedDocument() {
 
 async function uploadSelectedTemplate(file) {
   if (!file) {
+    return;
+  }
+  if (!isProjectManager()) {
+    setBackendMessage("Şablon yükleme yetkisi sadece adminlerde.", "error");
     return;
   }
   if (!file.name.toLowerCase().endsWith(".docx")) {
@@ -3137,6 +3185,10 @@ function downloadStateBackup() {
 }
 
 async function saveSnapshot() {
+  if (!isProjectManager()) {
+    setMaintenanceMessage("Snapshot alma yetkisi sadece adminlerde.", "error");
+    return;
+  }
   const result = await apiJson("/api/snapshot", {
     method: "POST",
     body: JSON.stringify({
@@ -3152,6 +3204,10 @@ async function saveSnapshot() {
 }
 
 async function reloadBackendState() {
+  if (!apiAuthToken) {
+    setMaintenanceMessage("Veritabanindan yuklemek icin once giris yap.", "warning");
+    return;
+  }
   const result = await apiJson("/api/state");
   if (!result?.payload) {
     setMaintenanceMessage("Veritabanında yüklenecek state bulunamadı.", "warning");

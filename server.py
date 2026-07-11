@@ -2,15 +2,19 @@ from __future__ import annotations
 
 import argparse
 import base64
+import binascii
 import hashlib
 import json
 import mimetypes
+import os
 import secrets
 import sqlite3
 import sys
+import time
 import zipfile
 from datetime import datetime, timezone
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+from io import BytesIO
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 from xml.sax.saxutils import escape
@@ -22,7 +26,10 @@ TEMPLATE_DIR = ROOT / "proje_yonetimi_ogrenci_belgeleri_word"
 UPLOAD_DIR = ROOT / "uploaded_templates"
 STATE_KEY = "main"
 MAX_UPLOAD_BYTES = 12 * 1024 * 1024
-CSRF_TOKEN = secrets.token_urlsafe(32)
+SESSION_TTL_SECONDS = 8 * 60 * 60
+RATE_WINDOW_SECONDS = 60
+RATE_LIMIT_DEFAULT = 90
+RATE_LIMIT_LOGIN = 12
 JSON_MIME = "application/json; charset=utf-8"
 DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 BLOCKED_STATIC_PATHS = {"/app_data.sqlite3", "/server.py", "/wsgi.py"}
@@ -36,12 +43,38 @@ ALLOWED_STATIC_PATHS = {
     "templates/index.html",
 }
 _WSGI_READY = False
+API_SESSIONS: dict[str, dict] = {}
+RATE_BUCKETS: dict[tuple[str, str], list[float]] = {}
 SECURITY_HEADERS = [
     ("X-Content-Type-Options", "nosniff"),
     ("X-Frame-Options", "DENY"),
+    ("Strict-Transport-Security", "max-age=31536000; includeSubDomains"),
     ("Referrer-Policy", "same-origin"),
     ("Permissions-Policy", "camera=(), microphone=(), geolocation=()"),
     ("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; form-action 'self'; base-uri 'self'"),
+]
+
+DEFAULT_ALLOWED_HOSTS = {
+    "127.0.0.1",
+    "localhost",
+    "alibehram11.pythonanywhere.com",
+}
+CONFIGURED_ALLOWED_HOSTS = {
+    host.strip().lower()
+    for host in os.environ.get("PROJECT_ALLOWED_HOSTS", "").split(",")
+    if host.strip()
+}
+ALLOWED_HOSTS = DEFAULT_ALLOWED_HOSTS | CONFIGURED_ALLOWED_HOSTS
+
+DEMO_USERS = [
+    {"id": "demo-admin", "name": "Ana Admin", "email": "admin@proje.local", "password": "123456", "role": "admin"},
+    {"id": "demo-yazilim", "name": "Yazilim Kaptani", "email": "yazilim@proje.local", "password": "123456", "role": "member"},
+    {"id": "demo-yazilim2", "name": "Yazilim Uyesi", "email": "yazilim2@proje.local", "password": "123456", "role": "member"},
+    {"id": "demo-tasarim", "name": "Tasarim Uyesi", "email": "tasarim@proje.local", "password": "123456", "role": "member"},
+    {"id": "demo-mekanik", "name": "Mekanik Kaptani", "email": "mekanik@proje.local", "password": "123456", "role": "member"},
+    {"id": "demo-elektronik", "name": "Elektronik Uyesi", "email": "elektronik@proje.local", "password": "123456", "role": "member"},
+    {"id": "demo-mentor", "name": "Mentor Kullanicisi", "email": "mentor@proje.local", "password": "123456", "role": "admin"},
+    {"id": "demo-atolye", "name": "Atolye Sorumlusu", "email": "atolye@proje.local", "password": "123456", "role": "admin"},
 ]
 
 KNOWN_TEMPLATES = {
@@ -60,6 +93,138 @@ KNOWN_TEMPLATES = {
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def host_name(host: str | None) -> str:
+    return (host or "").split(":", 1)[0].strip().lower()
+
+
+def is_allowed_host(host: str | None) -> bool:
+    return host_name(host) in ALLOWED_HOSTS
+
+
+def client_ip_from_headers(headers: dict | object) -> str:
+    if isinstance(headers, dict):
+        forwarded = headers.get("X-Forwarded-For") or headers.get("HTTP_X_FORWARDED_FOR") or ""
+        remote = headers.get("REMOTE_ADDR") or ""
+    else:
+        forwarded = headers.get("X-Forwarded-For", "")
+        remote = getattr(headers, "client_address", [""])[0] if hasattr(headers, "client_address") else ""
+    return (str(forwarded).split(",", 1)[0].strip() or str(remote) or "unknown")[:80]
+
+
+def rate_limit_key(ip: str, bucket: str, limit: int) -> bool:
+    now = time.time()
+    key = (ip, bucket)
+    entries = [item for item in RATE_BUCKETS.get(key, []) if now - item < RATE_WINDOW_SECONDS]
+    if len(entries) >= limit:
+        RATE_BUCKETS[key] = entries
+        return False
+    entries.append(now)
+    RATE_BUCKETS[key] = entries
+    return True
+
+
+def load_app_state() -> dict | None:
+    with connect_db() as conn:
+        row = conn.execute("SELECT payload_json FROM app_state WHERE key = ?", (STATE_KEY,)).fetchone()
+    if not row:
+        return None
+    try:
+        payload = json.loads(row[0])
+    except json.JSONDecodeError:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def user_role_from_state(state: dict | None, user_id: str, email: str) -> str:
+    normalized_email = email.lower()
+    if normalized_email in {"admin@proje.local", "mentor@proje.local", "atolye@proje.local"}:
+        return "admin"
+    for project in (state or {}).get("projects", []) if isinstance((state or {}).get("projects"), list) else []:
+        if not isinstance(project, dict):
+            continue
+        if project.get("ownerId") == user_id or user_id in (project.get("adminIds") or []):
+            return "admin"
+    return "member"
+
+
+def find_auth_user(email: str, password: str) -> dict | None:
+    normalized_email = (email or "").strip().lower()
+    state = load_app_state()
+    users = []
+    if isinstance(state, dict) and isinstance(state.get("users"), list):
+        users.extend(user for user in state["users"] if isinstance(user, dict))
+    if not users:
+        users.extend(DEMO_USERS)
+
+    for user in users:
+        if str(user.get("email", "")).lower() != normalized_email:
+            continue
+        if not secrets.compare_digest(str(user.get("password") or ""), str(password or "")):
+            continue
+        return {
+            "id": str(user.get("id") or normalized_email),
+            "name": str(user.get("name") or normalized_email),
+            "email": normalized_email,
+            "role": user.get("role") or user_role_from_state(state, str(user.get("id") or ""), normalized_email),
+        }
+    return None
+
+
+def create_api_session(user: dict) -> dict:
+    token = secrets.token_urlsafe(32)
+    csrf = secrets.token_urlsafe(32)
+    API_SESSIONS[token] = {
+        "userId": user["id"],
+        "email": user["email"],
+        "name": user["name"],
+        "role": user.get("role", "member"),
+        "csrf": csrf,
+        "expires": time.time() + SESSION_TTL_SECONDS,
+    }
+    return {"token": token, "csrfToken": csrf, "user": {key: user[key] for key in ("id", "name", "email", "role")}}
+
+
+def auth_from_headers(headers: dict, require_csrf: bool = False, admin: bool = False) -> tuple[dict | None, str | None]:
+    authorization = headers.get("Authorization") or headers.get("HTTP_AUTHORIZATION") or ""
+    if not authorization.startswith("Bearer "):
+        return None, "auth-required"
+    token = authorization.removeprefix("Bearer ").strip()
+    session = API_SESSIONS.get(token)
+    if not session or session.get("expires", 0) < time.time():
+        API_SESSIONS.pop(token, None)
+        return None, "auth-expired"
+    if require_csrf:
+        csrf = headers.get("X-CSRF-Token") or headers.get("HTTP_X_CSRF_TOKEN") or ""
+        if not secrets.compare_digest(csrf, session.get("csrf", "")):
+            return None, "csrf-token-invalid"
+    if admin and session.get("role") != "admin":
+        return None, "admin-required"
+    session["expires"] = time.time() + SESSION_TTL_SECONDS
+    return session, None
+
+
+def safe_error(error: str) -> str:
+    allowed = {
+        "auth-required",
+        "auth-expired",
+        "admin-required",
+        "csrf-token-invalid",
+        "origin-blocked",
+        "host-blocked",
+        "rate-limit",
+        "content-type-json-required",
+        "json-object-required",
+        "request-too-large",
+        "content-length-invalid",
+        "invalid-docx",
+        "unknown-template",
+        "file-too-large",
+        "not-found",
+        "method-not-allowed",
+    }
+    return error if error in allowed else "bad-request"
 
 
 def connect_db() -> sqlite3.Connection:
@@ -133,7 +298,12 @@ def db_log(actor: str, action: str, detail: object | None = None) -> None:
     with connect_db() as conn:
         conn.execute(
             "INSERT INTO logs (ts, actor, action, detail_json) VALUES (?, ?, ?, ?)",
-            (now_iso(), actor or "anonim", action, json.dumps(detail or {}, ensure_ascii=False)),
+            (
+                now_iso(),
+                safe_text(actor or "anonim", 120),
+                safe_text(action or "unknown", 120),
+                json.dumps(sanitize_value(detail or {}, depth=0), ensure_ascii=False),
+            ),
         )
         conn.execute(
             "DELETE FROM logs WHERE id NOT IN (SELECT id FROM logs ORDER BY id DESC LIMIT 1000)"
@@ -147,6 +317,42 @@ def json_response(handler: SimpleHTTPRequestHandler, payload: object, status: in
     handler.send_header("Content-Length", str(len(data)))
     handler.end_headers()
     handler.wfile.write(data)
+
+
+def safe_text(value: object, limit: int = 5000) -> str:
+    text = str(value or "")
+    text = "".join(char if char >= " " and char != "\x7f" else " " for char in text)
+    return text[:limit]
+
+
+def sanitize_value(value: object, depth: int = 0) -> object:
+    if depth > 8:
+        return ""
+    if isinstance(value, dict):
+        return {safe_text(key, 120): sanitize_value(item, depth + 1) for key, item in list(value.items())[:200]}
+    if isinstance(value, list):
+        return [sanitize_value(item, depth + 1) for item in value[:500]]
+    if isinstance(value, str):
+        return safe_text(value, 200_000)
+    if isinstance(value, (int, float, bool)) or value is None:
+        return value
+    return safe_text(value)
+
+
+def safe_download_name(value: object, fallback: str = "belge.docx") -> str:
+    text = safe_text(value, 120)
+    allowed = []
+    for char in text:
+        if char.isascii() and (char.isalnum() or char in {".", "_", "-"}):
+            allowed.append(char)
+        elif char.isspace():
+            allowed.append("-")
+    name = "".join(allowed).strip(".-_")[:100]
+    if not name:
+        name = fallback
+    if not name.lower().endswith(".docx"):
+        name = f"{name}.docx"
+    return name
 
 
 def parse_content_length(value: str | None) -> int:
@@ -278,10 +484,42 @@ def filled_docx(payload: dict) -> tuple[bytes, str]:
     return output.getvalue(), source_name
 
 
+def validate_docx_bytes(data: bytes) -> tuple[bool, str]:
+    if len(data) > MAX_UPLOAD_BYTES:
+        return False, "file-too-large"
+    try:
+        with zipfile.ZipFile(BytesIO(data), "r") as docx:
+            names = docx.namelist()
+            if len(names) > 250:
+                return False, "invalid-docx"
+            total = 0
+            for entry in docx.infolist():
+                name = entry.filename.replace("\\", "/").lower()
+                total += entry.file_size
+                if total > MAX_UPLOAD_BYTES * 3:
+                    return False, "file-too-large"
+                if name.startswith("/") or "../" in name or name.startswith("../"):
+                    return False, "invalid-docx"
+                if name.endswith("vbaproject.bin") or "vba" in name or name.endswith(".exe"):
+                    return False, "invalid-docx"
+                if name.endswith(".rels"):
+                    rels = docx.read(entry.filename)[:1_000_000].decode("utf-8", errors="ignore").lower()
+                    if "targetmode=\"external\"" in rels or "targetmode='external'" in rels:
+                        return False, "invalid-docx"
+            required = {"[content_types].xml", "_rels/.rels", "word/document.xml"}
+            if not required.issubset({name.lower() for name in names}):
+                return False, "invalid-docx"
+    except zipfile.BadZipFile:
+        return False, "invalid-docx"
+    return True, "ok"
+
+
 def sanitize_state_payload(payload: object) -> object:
     if not isinstance(payload, dict):
         return {}
-    clean = dict(payload)
+    clean = sanitize_value(payload)
+    if not isinstance(clean, dict):
+        return {}
     users = clean.get("users")
     if isinstance(users, list):
         clean["users"] = [
@@ -293,7 +531,10 @@ def sanitize_state_payload(payload: object) -> object:
 
 
 def same_host_origins(host: str) -> set[str]:
-    return {f"http://{host}", f"https://{host}"} if host else set()
+    clean_host = host_name(host)
+    if clean_host not in ALLOWED_HOSTS:
+        return set()
+    return {f"http://{clean_host}", f"https://{clean_host}"}
 
 
 def allowed_origin(handler: SimpleHTTPRequestHandler) -> str | None:
@@ -305,12 +546,20 @@ def allowed_origin(handler: SimpleHTTPRequestHandler) -> str | None:
 def request_origin_is_allowed(handler: SimpleHTTPRequestHandler) -> bool:
     origin = handler.headers.get("Origin")
     if not origin:
-        return True
+        return False
     return bool(allowed_origin(handler))
 
 
 def csrf_is_valid(handler: SimpleHTTPRequestHandler) -> bool:
-    return handler.headers.get("X-CSRF-Token") == CSRF_TOKEN
+    return False
+
+
+def handler_headers(handler: SimpleHTTPRequestHandler) -> dict[str, str]:
+    return {key: value for key, value in handler.headers.items()}
+
+
+def handler_auth(handler: SimpleHTTPRequestHandler, require_csrf: bool = False, admin: bool = False) -> tuple[dict | None, str | None]:
+    return auth_from_headers(handler_headers(handler), require_csrf=require_csrf, admin=admin)
 
 
 def static_file_path(request_path: str) -> Path | None:
@@ -359,6 +608,9 @@ class Handler(SimpleHTTPRequestHandler):
         super().end_headers()
 
     def do_OPTIONS(self) -> None:
+        if not is_allowed_host(self.headers.get("Host", "")):
+            json_response(self, {"ok": False, "error": "host-blocked"}, 403)
+            return
         if not request_origin_is_allowed(self):
             json_response(self, {"ok": False, "error": "origin-blocked"}, 403)
             return
@@ -366,17 +618,29 @@ class Handler(SimpleHTTPRequestHandler):
         self.end_headers()
 
     def do_GET(self) -> None:
+        if not is_allowed_host(self.headers.get("Host", "")):
+            json_response(self, {"ok": False, "error": "host-blocked"}, 403)
+            return
         path = urlparse(self.path).path
         if path == "/api/health":
-            json_response(self, {"ok": True, "database": DB_PATH.name, "templateCount": len(KNOWN_TEMPLATES), "csrfToken": CSRF_TOKEN})
+            session, _ = handler_auth(self)
+            json_response(self, {"ok": True, "authenticated": bool(session)})
             return
         if path == "/api/state":
+            session, error = handler_auth(self)
+            if error:
+                json_response(self, {"ok": False, "error": error}, 401)
+                return
             with connect_db() as conn:
                 row = conn.execute("SELECT payload_json, updated_at, updated_by, reason FROM app_state WHERE key = ?", (STATE_KEY,)).fetchone()
             payload = sanitize_state_payload(json.loads(row[0])) if row else None
             json_response(self, {"ok": True, "payload": payload, "updatedAt": row[1] if row else None, "updatedBy": row[2] if row else None, "reason": row[3] if row else None})
             return
         if path == "/api/logs":
+            session, error = handler_auth(self, admin=True)
+            if error:
+                json_response(self, {"ok": False, "error": error}, 403 if error == "admin-required" else 401)
+                return
             with connect_db() as conn:
                 rows = conn.execute("SELECT id, ts, actor, action, detail_json FROM logs ORDER BY id DESC LIMIT 100").fetchall()
             logs = [
@@ -386,6 +650,10 @@ class Handler(SimpleHTTPRequestHandler):
             json_response(self, {"ok": True, "logs": logs})
             return
         if path == "/api/snapshots":
+            session, error = handler_auth(self, admin=True)
+            if error:
+                json_response(self, {"ok": False, "error": error}, 403 if error == "admin-required" else 401)
+                return
             with connect_db() as conn:
                 rows = conn.execute("SELECT id, ts, actor FROM snapshots ORDER BY id DESC LIMIT 50").fetchall()
             json_response(self, {"ok": True, "snapshots": [{"id": row[0], "ts": row[1], "actor": row[2]} for row in rows]})
@@ -398,15 +666,32 @@ class Handler(SimpleHTTPRequestHandler):
     def do_POST(self) -> None:
         path = urlparse(self.path).path
         try:
+            if not is_allowed_host(self.headers.get("Host", "")):
+                json_response(self, {"ok": False, "error": "host-blocked"}, 403)
+                return
+            client_ip = client_ip_from_headers({"REMOTE_ADDR": self.client_address[0] if self.client_address else ""})
+            if not rate_limit_key(client_ip, path, RATE_LIMIT_LOGIN if path == "/api/auth/login" else RATE_LIMIT_DEFAULT):
+                json_response(self, {"ok": False, "error": "rate-limit"}, 429)
+                return
             if not request_origin_is_allowed(self):
                 json_response(self, {"ok": False, "error": "origin-blocked"}, 403)
                 return
-            if not csrf_is_valid(self):
-                json_response(self, {"ok": False, "error": "csrf-token-invalid"}, 403)
-                return
             payload = read_json(self)
+            if path == "/api/auth/login":
+                user = find_auth_user(str(payload.get("email", "")), str(payload.get("password", "")))
+                if not user:
+                    json_response(self, {"ok": False, "error": "auth-required"}, 401)
+                    return
+                result = create_api_session(user)
+                db_log(user["email"], "auth.api.login", {"role": user.get("role", "member")})
+                json_response(self, {"ok": True, **result})
+                return
+            session, error = handler_auth(self, require_csrf=True, admin=path in {"/api/state", "/api/snapshot", "/api/docx/upload"})
+            if error:
+                json_response(self, {"ok": False, "error": error}, 403 if error in {"admin-required", "csrf-token-invalid"} else 401)
+                return
             if path == "/api/log":
-                db_log(payload.get("actor", "anonim"), payload.get("action", "unknown"), payload.get("detail", {}))
+                db_log(session["email"], payload.get("action", "unknown"), payload.get("detail", {}))
                 json_response(self, {"ok": True})
                 return
             if path == "/api/state":
@@ -425,21 +710,21 @@ class Handler(SimpleHTTPRequestHandler):
                             STATE_KEY,
                             json.dumps(sanitize_state_payload(payload.get("payload") or {}), ensure_ascii=False),
                             now_iso(),
-                            payload.get("actor", "anonim"),
+                            session["email"],
                             payload.get("reason", "manual"),
                         ),
                     )
-                db_log(payload.get("actor", "anonim"), "state.saved", {"reason": payload.get("reason", "manual")})
+                db_log(session["email"], "state.saved", {"reason": payload.get("reason", "manual")})
                 json_response(self, {"ok": True})
                 return
             if path == "/api/snapshot":
                 with connect_db() as conn:
                     cursor = conn.execute(
                         "INSERT INTO snapshots (ts, actor, payload_json) VALUES (?, ?, ?)",
-                        (now_iso(), payload.get("actor", "anonim"), json.dumps(sanitize_state_payload(payload.get("payload") or {}), ensure_ascii=False)),
+                        (now_iso(), session["email"], json.dumps(sanitize_state_payload(payload.get("payload") or {}), ensure_ascii=False)),
                     )
                     snapshot_id = cursor.lastrowid
-                db_log(payload.get("actor", "anonim"), "snapshot.created", {"snapshotId": snapshot_id})
+                db_log(session["email"], "snapshot.created", {"snapshotId": snapshot_id})
                 json_response(self, {"ok": True, "snapshotId": snapshot_id})
                 return
             if path == "/api/docx/check":
@@ -460,30 +745,31 @@ class Handler(SimpleHTTPRequestHandler):
                 if file_name not in KNOWN_TEMPLATES.values():
                     json_response(self, {"ok": False, "error": "unknown-template"}, 400)
                     return
-                data = base64.b64decode(payload.get("dataBase64", ""), validate=True)
-                if len(data) > MAX_UPLOAD_BYTES:
-                    json_response(self, {"ok": False, "error": "file-too-large"}, 400)
+                try:
+                    data = base64.b64decode(payload.get("dataBase64", ""), validate=True)
+                except (binascii.Error, ValueError):
+                    json_response(self, {"ok": False, "error": "invalid-docx"}, 400)
+                    return
+                valid, validation_error = validate_docx_bytes(data)
+                if not valid:
+                    json_response(self, {"ok": False, "error": validation_error}, 400)
                     return
                 target = UPLOAD_DIR / file_name
                 target.write_bytes(data)
-                if not zipfile.is_zipfile(target):
-                    target.unlink(missing_ok=True)
-                    json_response(self, {"ok": False, "error": "invalid-docx"}, 400)
-                    return
                 digest = file_sha256(target)
                 with connect_db() as conn:
                     conn.execute(
                         "INSERT INTO uploaded_templates (file_name, stored_path, sha256, uploaded_at, uploaded_by) VALUES (?, ?, ?, ?, ?)",
-                        (file_name, str(target), digest, now_iso(), payload.get("actor", "anonim")),
+                        (file_name, str(target), digest, now_iso(), session["email"]),
                     )
-                db_log(payload.get("actor", "anonim"), "template.uploaded", {"fileName": file_name, "sha256": digest})
+                db_log(session["email"], "template.uploaded", {"fileName": file_name, "sha256": digest})
                 json_response(self, {"ok": True, "sha256": digest})
                 return
             if path == "/api/docx/export":
                 data, source_name = filled_docx(payload)
-                db_log(payload.get("actor", "anonim"), "document.exported", {"template": source_name, "project": payload.get("projectName", "")})
+                db_log(session["email"], "document.exported", {"template": source_name, "project": payload.get("projectName", "")})
                 file_name = f"{payload.get('projectName', 'proje')}-{payload.get('title', 'belge')}.docx"
-                safe_name = "".join("-" if char in '\\/:*?"<>|' else char for char in file_name)
+                safe_name = safe_download_name(file_name)
                 self.send_response(200)
                 self.send_header("Content-Type", DOCX_MIME)
                 self.send_header("Content-Disposition", f'attachment; filename="{safe_name.encode("ascii", "ignore").decode("ascii") or "belge.docx"}"')
@@ -493,9 +779,10 @@ class Handler(SimpleHTTPRequestHandler):
                 return
             json_response(self, {"ok": False, "error": "not-found"}, 404)
         except ValueError as exc:
-            json_response(self, {"ok": False, "error": str(exc)}, 400)
+            json_response(self, {"ok": False, "error": safe_error(str(exc))}, 400)
         except Exception as exc:  # Keep local server debuggable for the admin screen.
-            json_response(self, {"ok": False, "error": str(exc)}, 500)
+            db_log("system", "server.error", {"path": path, "type": type(exc).__name__})
+            json_response(self, {"ok": False, "error": "internal-error"}, 500)
 
 
 def wsgi_status(code: int) -> str:
@@ -557,7 +844,7 @@ def wsgi_read_json(environ: dict) -> dict:
 
 
 def wsgi_origin_is_allowed(environ: dict) -> bool:
-    return not environ.get("HTTP_ORIGIN") or bool(wsgi_origin(environ))
+    return bool(environ.get("HTTP_ORIGIN")) and bool(wsgi_origin(environ))
 
 
 def wsgi_csrf_is_valid(environ: dict) -> bool:
@@ -589,6 +876,8 @@ def application(environ, start_response):
     method = environ.get("REQUEST_METHOD", "GET").upper()
     path = environ.get("PATH_INFO") or "/"
     try:
+        if not is_allowed_host(environ.get("HTTP_HOST", "")):
+            return wsgi_json(environ, start_response, {"ok": False, "error": "host-blocked"}, 403)
         if method == "OPTIONS":
             if not wsgi_origin_is_allowed(environ):
                 return wsgi_json(environ, start_response, {"ok": False, "error": "origin-blocked"}, 403)
@@ -596,13 +885,20 @@ def application(environ, start_response):
             return [b""]
         if method == "GET":
             if path == "/api/health":
-                return wsgi_json(environ, start_response, {"ok": True, "database": DB_PATH.name, "templateCount": len(KNOWN_TEMPLATES), "csrfToken": CSRF_TOKEN})
+                session, _ = auth_from_headers(environ)
+                return wsgi_json(environ, start_response, {"ok": True, "authenticated": bool(session)})
             if path == "/api/state":
+                session, error = auth_from_headers(environ)
+                if error:
+                    return wsgi_json(environ, start_response, {"ok": False, "error": error}, 401)
                 with connect_db() as conn:
                     row = conn.execute("SELECT payload_json, updated_at, updated_by, reason FROM app_state WHERE key = ?", (STATE_KEY,)).fetchone()
                 payload = sanitize_state_payload(json.loads(row[0])) if row else None
                 return wsgi_json(environ, start_response, {"ok": True, "payload": payload, "updatedAt": row[1] if row else None, "updatedBy": row[2] if row else None, "reason": row[3] if row else None})
             if path == "/api/logs":
+                session, error = auth_from_headers(environ, admin=True)
+                if error:
+                    return wsgi_json(environ, start_response, {"ok": False, "error": error}, 403 if error == "admin-required" else 401)
                 with connect_db() as conn:
                     rows = conn.execute("SELECT id, ts, actor, action, detail_json FROM logs ORDER BY id DESC LIMIT 100").fetchall()
                 logs = [
@@ -611,18 +907,32 @@ def application(environ, start_response):
                 ]
                 return wsgi_json(environ, start_response, {"ok": True, "logs": logs})
             if path == "/api/snapshots":
+                session, error = auth_from_headers(environ, admin=True)
+                if error:
+                    return wsgi_json(environ, start_response, {"ok": False, "error": error}, 403 if error == "admin-required" else 401)
                 with connect_db() as conn:
                     rows = conn.execute("SELECT id, ts, actor FROM snapshots ORDER BY id DESC LIMIT 50").fetchall()
                 return wsgi_json(environ, start_response, {"ok": True, "snapshots": [{"id": row[0], "ts": row[1], "actor": row[2]} for row in rows]})
             return wsgi_static(environ, start_response, path)
         if method == "POST":
+            client_ip = client_ip_from_headers(environ)
+            if not rate_limit_key(client_ip, path, RATE_LIMIT_LOGIN if path == "/api/auth/login" else RATE_LIMIT_DEFAULT):
+                return wsgi_json(environ, start_response, {"ok": False, "error": "rate-limit"}, 429)
             if not wsgi_origin_is_allowed(environ):
                 return wsgi_json(environ, start_response, {"ok": False, "error": "origin-blocked"}, 403)
-            if not wsgi_csrf_is_valid(environ):
-                return wsgi_json(environ, start_response, {"ok": False, "error": "csrf-token-invalid"}, 403)
             payload = wsgi_read_json(environ)
+            if path == "/api/auth/login":
+                user = find_auth_user(str(payload.get("email", "")), str(payload.get("password", "")))
+                if not user:
+                    return wsgi_json(environ, start_response, {"ok": False, "error": "auth-required"}, 401)
+                result = create_api_session(user)
+                db_log(user["email"], "auth.api.login", {"role": user.get("role", "member")})
+                return wsgi_json(environ, start_response, {"ok": True, **result})
+            session, error = auth_from_headers(environ, require_csrf=True, admin=path in {"/api/state", "/api/snapshot", "/api/docx/upload"})
+            if error:
+                return wsgi_json(environ, start_response, {"ok": False, "error": error}, 403 if error in {"admin-required", "csrf-token-invalid"} else 401)
             if path == "/api/log":
-                db_log(payload.get("actor", "anonim"), payload.get("action", "unknown"), payload.get("detail", {}))
+                db_log(session["email"], payload.get("action", "unknown"), payload.get("detail", {}))
                 return wsgi_json(environ, start_response, {"ok": True})
             if path == "/api/state":
                 with connect_db() as conn:
@@ -640,20 +950,20 @@ def application(environ, start_response):
                             STATE_KEY,
                             json.dumps(sanitize_state_payload(payload.get("payload") or {}), ensure_ascii=False),
                             now_iso(),
-                            payload.get("actor", "anonim"),
+                            session["email"],
                             payload.get("reason", "manual"),
                         ),
                     )
-                db_log(payload.get("actor", "anonim"), "state.saved", {"reason": payload.get("reason", "manual")})
+                db_log(session["email"], "state.saved", {"reason": payload.get("reason", "manual")})
                 return wsgi_json(environ, start_response, {"ok": True})
             if path == "/api/snapshot":
                 with connect_db() as conn:
                     cursor = conn.execute(
                         "INSERT INTO snapshots (ts, actor, payload_json) VALUES (?, ?, ?)",
-                        (now_iso(), payload.get("actor", "anonim"), json.dumps(sanitize_state_payload(payload.get("payload") or {}), ensure_ascii=False)),
+                        (now_iso(), session["email"], json.dumps(sanitize_state_payload(payload.get("payload") or {}), ensure_ascii=False)),
                     )
                     snapshot_id = cursor.lastrowid
-                db_log(payload.get("actor", "anonim"), "snapshot.created", {"snapshotId": snapshot_id})
+                db_log(session["email"], "snapshot.created", {"snapshotId": snapshot_id})
                 return wsgi_json(environ, start_response, {"ok": True, "snapshotId": snapshot_id})
             if path == "/api/docx/check":
                 source = template_path(payload.get("templateId"), payload.get("fileName"))
@@ -672,36 +982,38 @@ def application(environ, start_response):
                 file_name = payload.get("fileName", "")
                 if file_name not in KNOWN_TEMPLATES.values():
                     return wsgi_json(environ, start_response, {"ok": False, "error": "unknown-template"}, 400)
-                data = base64.b64decode(payload.get("dataBase64", ""), validate=True)
-                if len(data) > MAX_UPLOAD_BYTES:
-                    return wsgi_json(environ, start_response, {"ok": False, "error": "file-too-large"}, 400)
+                try:
+                    data = base64.b64decode(payload.get("dataBase64", ""), validate=True)
+                except (binascii.Error, ValueError):
+                    return wsgi_json(environ, start_response, {"ok": False, "error": "invalid-docx"}, 400)
+                valid, validation_error = validate_docx_bytes(data)
+                if not valid:
+                    return wsgi_json(environ, start_response, {"ok": False, "error": validation_error}, 400)
                 target = UPLOAD_DIR / file_name
                 target.write_bytes(data)
-                if not zipfile.is_zipfile(target):
-                    target.unlink(missing_ok=True)
-                    return wsgi_json(environ, start_response, {"ok": False, "error": "invalid-docx"}, 400)
                 digest = file_sha256(target)
                 with connect_db() as conn:
                     conn.execute(
                         "INSERT INTO uploaded_templates (file_name, stored_path, sha256, uploaded_at, uploaded_by) VALUES (?, ?, ?, ?, ?)",
-                        (file_name, str(target), digest, now_iso(), payload.get("actor", "anonim")),
+                        (file_name, str(target), digest, now_iso(), session["email"]),
                     )
-                db_log(payload.get("actor", "anonim"), "template.uploaded", {"fileName": file_name, "sha256": digest})
+                db_log(session["email"], "template.uploaded", {"fileName": file_name, "sha256": digest})
                 return wsgi_json(environ, start_response, {"ok": True, "sha256": digest})
             if path == "/api/docx/export":
                 data, source_name = filled_docx(payload)
-                db_log(payload.get("actor", "anonim"), "document.exported", {"template": source_name, "project": payload.get("projectName", "")})
+                db_log(session["email"], "document.exported", {"template": source_name, "project": payload.get("projectName", "")})
                 file_name = f"{payload.get('projectName', 'proje')}-{payload.get('title', 'belge')}.docx"
-                safe_name = "".join("-" if char in '\\/:*?"<>|' else char for char in file_name)
+                safe_name = safe_download_name(file_name)
                 headers = [("Content-Disposition", f'attachment; filename="{safe_name.encode("ascii", "ignore").decode("ascii") or "belge.docx"}"')]
                 start_response(wsgi_status(200), wsgi_headers(environ, DOCX_MIME, len(data), headers))
                 return [data]
             return wsgi_json(environ, start_response, {"ok": False, "error": "not-found"}, 404)
         return wsgi_json(environ, start_response, {"ok": False, "error": "method-not-allowed"}, 405)
     except ValueError as exc:
-        return wsgi_json(environ, start_response, {"ok": False, "error": str(exc)}, 400)
+        return wsgi_json(environ, start_response, {"ok": False, "error": safe_error(str(exc))}, 400)
     except Exception as exc:
-        return wsgi_json(environ, start_response, {"ok": False, "error": str(exc)}, 500)
+        db_log("system", "server.error", {"path": path, "type": type(exc).__name__})
+        return wsgi_json(environ, start_response, {"ok": False, "error": "internal-error"}, 500)
 
 
 def check_environment() -> int:

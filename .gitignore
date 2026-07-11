@@ -205,6 +205,8 @@ tempCodeRunnerFile.py
 
 # Project Management local runtime files
 app_data.sqlite3
+app_data.sqlite3-shm
+app_data.sqlite3-wal
 uploaded_templates/
 self-test-result.png
 atolye-test-result.png
