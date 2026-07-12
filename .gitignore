@@ -213,6 +213,7 @@ atolye-test-result.png
 .atolye-source/
 pythonanywhere_upload/
 .security_test_runtime/
+.advanced_test_runtime/
 
 # Ruff stuff:
 .ruff_cache/

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+import math
 import sqlite3
 import zipfile
 from io import BytesIO
@@ -11,7 +12,7 @@ import server
 
 
 def configure_test_backend(tmpdir: Path) -> None:
-    tmpdir.mkdir(exist_ok=True)
+    tmpdir.mkdir(parents=True, exist_ok=True)
     db_path = tmpdir / "security_test.sqlite3"
     if db_path.exists():
         db_path.unlink()
@@ -91,12 +92,71 @@ def login(email: str, password: str, remote: str = "127.0.0.1") -> dict:
 def minimal_docx_b64(extra_name: str | None = None, extra_data: bytes = b"") -> str:
     output = BytesIO()
     with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as docx:
-        docx.writestr("[Content_Types].xml", "<Types/>")
-        docx.writestr("_rels/.rels", "<Relationships/>")
-        docx.writestr("word/document.xml", "<w:document/>")
+        docx.writestr(
+            "[Content_Types].xml",
+            '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+            '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>'
+            "</Types>",
+        )
+        docx.writestr(
+            "_rels/.rels",
+            '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+            '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>'
+            "</Relationships>",
+        )
+        docx.writestr("word/document.xml", '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"/>')
         if extra_name:
             docx.writestr(extra_name, extra_data)
     return base64.b64encode(output.getvalue()).decode("ascii")
+
+
+def custom_docx_b64(replacements: dict[str, bytes | str], duplicate: tuple[str, bytes] | None = None) -> str:
+    base = {
+        "[Content_Types].xml": (
+            '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+            '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>'
+            "</Types>"
+        ),
+        "_rels/.rels": (
+            '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+            '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>'
+            "</Relationships>"
+        ),
+        "word/document.xml": '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"/>',
+    }
+    base.update(replacements)
+    output = BytesIO()
+    with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as docx:
+        for name, value in base.items():
+            docx.writestr(name, value)
+        if duplicate:
+            docx.writestr(duplicate[0], duplicate[1])
+    return base64.b64encode(output.getvalue()).decode("ascii")
+
+
+def initial_state() -> dict:
+    users = [dict(user) for user in server.DEMO_USERS]
+    member_ids = [user["id"] for user in users]
+    return {
+        "users": users,
+        "projects": [{
+            "id": "project-1",
+            "name": "Security Test",
+            "ownerId": "demo-admin",
+            "memberIds": member_ids,
+            "adminIds": ["demo-admin", "demo-mentor", "demo-atolye"],
+            "memberProfiles": {user_id: {"role": "member", "team": "Yönetim"} for user_id in member_ids},
+        }],
+        "tasks": [],
+        "invites": [],
+        "calendarEvents": [],
+        "crmItems": [],
+        "feedItems": [],
+        "documents": {},
+        "documentTemplates": [],
+        "atolyeRequests": [],
+        "trash": [],
+    }
 
 
 def run() -> None:
@@ -139,8 +199,8 @@ def run() -> None:
     add("17 missing bearer token rejected", lambda: expect_status("missing bearer", request("POST", "/api/log", {"action": "x"}, {"Origin": "https://alibehram11.pythonanywhere.com", "Content-Type": "application/json"})[0], "401"))
     add("18 wrong csrf rejected", lambda: expect_status("wrong csrf", request("POST", "/api/log", {"action": "x"}, {**context["admin"], "X-CSRF-Token": "bad"})[0], "403"))
     add("19 valid auth log accepted", lambda: expect_status("valid log", request("POST", "/api/log", {"action": "ok"}, context["admin"])[0], "200"))
-    add("20 member cannot write state", lambda: expect_status("member state", request("POST", "/api/state", {"payload": {}}, context["member"])[0], "403"))
-    add("21 admin can write state", lambda: expect_status("admin state", request("POST", "/api/state", {"payload": {"users": [], "projects": []}, "reason": "test"}, context["admin"])[0], "200"))
+    add("20 member cannot write state", lambda: expect_status("member state", request("POST", "/api/state", {"payload": {}, "revision": 0}, context["member"])[0], "403"))
+    add("21 admin can write state", lambda: expect_status("admin state", request("POST", "/api/state", {"payload": initial_state(), "revision": 0, "reason": "test"}, context["admin"])[0], "200"))
     add("22 snapshot requires admin", lambda: expect_status("member snapshot", request("POST", "/api/snapshot", {"payload": {}}, context["member"])[0], "403"))
     add("23 admin can create snapshot", lambda: expect_status("admin snapshot", request("POST", "/api/snapshot", {"payload": {}}, context["admin"])[0], "200"))
     add("24 logs require admin", lambda: expect_status("member logs", request("GET", "/api/logs", headers=context["member"])[0], "403"))
@@ -163,7 +223,7 @@ def run() -> None:
     add("31 negative content length rejected", lambda: expect_status("negative length", request("POST", "/api/log", b"", {**context["admin"], "Content-Length": "-1"})[0], "400"))
     add("32 docx upload requires admin", lambda: expect_status("member upload", request("POST", "/api/docx/upload", {"fileName": "01_FR-01_Proje_Tanim_Karti.docx", "dataBase64": minimal_docx_b64()}, context["member"])[0], "403"))
     add("33 docx upload rejects macros", lambda: expect_status("macro upload", request("POST", "/api/docx/upload", {"fileName": "01_FR-01_Proje_Tanim_Karti.docx", "dataBase64": minimal_docx_b64("word/vbaProject.bin", b"x")}, context["admin"])[0], "400"))
-    add("34 docx upload rejects external rels", lambda: expect_status("external rels", request("POST", "/api/docx/upload", {"fileName": "01_FR-01_Proje_Tanim_Karti.docx", "dataBase64": minimal_docx_b64("word/_rels/document.xml.rels", b"<Relationship TargetMode=\"External\"/>")}, context["admin"])[0], "400"))
+    add("34 docx upload rejects external rels", lambda: expect_status("external rels", request("POST", "/api/docx/upload", {"fileName": "01_FR-01_Proje_Tanim_Karti.docx", "dataBase64": minimal_docx_b64("word/_rels/document.xml.rels", b'<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId9" TargetMode="External" Target="https://evil.example/payload"/></Relationships>')}, context["admin"])[0], "400"))
     add("35 docx upload rejects invalid base64", lambda: expect_status("invalid base64", request("POST", "/api/docx/upload", {"fileName": "01_FR-01_Proje_Tanim_Karti.docx", "dataBase64": "not-base64!!"}, context["admin"])[0], "400"))
     add("36 docx upload traversal filename rejected", lambda: expect_status("upload traversal", request("POST", "/api/docx/upload", {"fileName": "../server.py", "dataBase64": ""}, context["admin"])[0], "400"))
     add("37 docx export requires auth", lambda: expect_status("export unauth", request("POST", "/api/docx/export", {}, {"Origin": "https://alibehram11.pythonanywhere.com", "Content-Type": "application/json"})[0], "401"))
@@ -172,7 +232,85 @@ def run() -> None:
         lambda text: None
         if "function visibleAtolyeRequests()" in text and "request.createdBy === session.userId" in text
         else (_ for _ in ()).throw(AssertionError("frontend request privacy helper missing"))
-    )(Path("app.js").read_text(encoding="utf-8")))
+    )((Path("app.js") if Path("app.js").exists() else Path("static/app.js")).read_text(encoding="utf-8")))
+
+    def malformed_json_hides_exception():
+        status, _, body = request("POST", "/api/log", b"{not-json", context["admin"])
+        expect_status("malformed hidden", status, "400")
+        if json_body(body) != {"ok": False, "error": "bad-request"}:
+            raise AssertionError("JSON decoder details leaked")
+
+    add("40 malformed JSON hides parser exception", malformed_json_hides_exception)
+
+    def unexpected_exception_is_generic():
+        original = server.find_auth_user
+        server.find_auth_user = lambda *_: (_ for _ in ()).throw(RuntimeError("SECRET_PATH:C:/private/app.db"))
+        try:
+            status, _, body = request(
+                "POST",
+                "/api/auth/login",
+                {"email": "admin@proje.local", "password": "123456"},
+                {"Origin": "https://alibehram11.pythonanywhere.com", "Content-Type": "application/json", "Remote-Addr": "127.0.0.9"},
+            )
+        finally:
+            server.find_auth_user = original
+        expect_status("internal exception", status, "500")
+        if json_body(body) != {"ok": False, "error": "internal-error"} or b"SECRET_PATH" in body:
+            raise AssertionError("internal exception details leaked")
+
+    add("41 unexpected exception response is generic", unexpected_exception_is_generic)
+
+    def sanitizer_blocks_dangerous_values():
+        clean = server.sanitize_value({
+            "__proto__": {"admin": True},
+            "constructor": "pollute",
+            "visible": "normal\u202etext\x00",
+            "number": math.nan,
+        })
+        if "__proto__" in clean or "constructor" in clean:
+            raise AssertionError("prototype pollution keys survived")
+        if "\u202e" in clean["visible"] or "\x00" in clean["visible"] or clean["number"] is not None:
+            raise AssertionError("unsafe scalar value survived")
+
+    add("42 sanitizer blocks prototype keys and unsafe scalars", sanitizer_blocks_dangerous_values)
+
+    def sanitizer_enforces_limits():
+        deep: object = "leaf"
+        for _ in range(server.MAX_SANITIZE_DEPTH + 4):
+            deep = {"next": deep}
+        clean = server.sanitize_value({"deep": deep, "long": "x" * (server.MAX_SANITIZE_STRING + 500)})
+        if len(clean["long"]) != server.MAX_SANITIZE_STRING:
+            raise AssertionError("string length limit failed")
+        cursor = clean["deep"]
+        for _ in range(server.MAX_SANITIZE_DEPTH + 2):
+            if cursor is None:
+                return
+            cursor = cursor.get("next") if isinstance(cursor, dict) else None
+        raise AssertionError("depth limit failed")
+
+    add("43 sanitizer enforces depth and string limits", sanitizer_enforces_limits)
+    add("44 JSON NaN is rejected", lambda: expect_status("nan json", request("POST", "/api/log", b'{"action":NaN}', context["admin"])[0], "400"))
+    add("45 valid DOCX upload is accepted", lambda: expect_status("valid docx", request("POST", "/api/docx/upload", {"fileName": "01_FR-01_Proje_Tanim_Karti.docx", "dataBase64": minimal_docx_b64()}, context["admin"])[0], "200"))
+    add("46 DOCX malformed XML is rejected", lambda: expect_status("malformed xml", request("POST", "/api/docx/upload", {"fileName": "01_FR-01_Proje_Tanim_Karti.docx", "dataBase64": custom_docx_b64({"word/document.xml": "<w:document>"})}, context["admin"])[0], "400"))
+    add("47 DOCX DTD is rejected", lambda: expect_status("docx dtd", request("POST", "/api/docx/upload", {"fileName": "01_FR-01_Proje_Tanim_Karti.docx", "dataBase64": custom_docx_b64({"word/document.xml": '<!DOCTYPE x [<!ENTITY e "boom">]><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">&e;</w:document>'})}, context["admin"])[0], "400"))
+    add("48 DOCX duplicate canonical path is rejected", lambda: expect_status("duplicate path", request("POST", "/api/docx/upload", {"fileName": "01_FR-01_Proje_Tanim_Karti.docx", "dataBase64": custom_docx_b64({}, ("WORD/DOCUMENT.XML", b"x"))}, context["admin"])[0], "400"))
+    add("49 DOCX compression bomb is rejected", lambda: expect_status("zip bomb", request("POST", "/api/docx/upload", {"fileName": "01_FR-01_Proje_Tanim_Karti.docx", "dataBase64": custom_docx_b64({"word/media/image.png": b"A" * 1_000_000})}, context["admin"])[0], "400"))
+    add("50 DOCX embedded object is rejected", lambda: expect_status("embedded object", request("POST", "/api/docx/upload", {"fileName": "01_FR-01_Proje_Tanim_Karti.docx", "dataBase64": custom_docx_b64({"word/embeddings/oleObject1.bin": b"payload"})}, context["admin"])[0], "400"))
+    add("51 DOCX macro content type is rejected", lambda: expect_status("macro content type", request("POST", "/api/docx/upload", {"fileName": "01_FR-01_Proje_Tanim_Karti.docx", "dataBase64": custom_docx_b64({"[Content_Types].xml": '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Override PartName="/word/document.xml" ContentType="application/vnd.ms-word.document.macroEnabled.main+xml"/></Types>'})}, context["admin"])[0], "400"))
+    add("52 DOCX relationship traversal is rejected", lambda: expect_status("relationship traversal", request("POST", "/api/docx/upload", {"fileName": "01_FR-01_Proje_Tanim_Karti.docx", "dataBase64": custom_docx_b64({"word/_rels/document.xml.rels": '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId2" Target="../../outside.bin"/></Relationships>'})}, context["admin"])[0], "400"))
+
+    def valid_docx_export_works():
+        status, headers, body = request(
+            "POST",
+            "/api/docx/export",
+            {"templateId": "fr01", "projectName": "Guvenlik Testi", "title": "Rapor", "questions": ["Sonuc"], "answers": {"q0": "Basarili"}},
+            context["admin"],
+        )
+        expect_status("valid export", status, "200")
+        if headers.get("Content-Type") != server.DOCX_MIME or not zipfile.is_zipfile(BytesIO(body)):
+            raise AssertionError("valid DOCX export failed")
+
+    add("53 valid provided template exports as DOCX", valid_docx_export_works)
 
     passed = []
     configure_test_backend(Path(".security_test_runtime"))

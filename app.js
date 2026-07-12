@@ -261,6 +261,7 @@ let latestLogs = [];
 let csrfToken = "";
 let apiAuthToken = session.apiToken || "";
 let apiCsrfToken = session.apiCsrfToken || "";
+let backendRevision = Number(session.backendRevision || 0);
 
 function uid() {
   if (window.crypto?.randomUUID) {
@@ -354,6 +355,9 @@ function mergeAuthFields(incomingState, localState) {
 
 function ensureTestPasswords(users) {
   users.forEach((user) => {
+    if (user.deleted) {
+      return;
+    }
     const demoPassword = DEMO_PASSWORD_BY_EMAIL.get(user.email.toLowerCase());
     if (demoPassword && !user.password) {
       user.password = demoPassword;
@@ -737,12 +741,15 @@ async function apiJson(path, options = {}) {
       },
       ...options,
     });
+    const responsePayload = response.status === 204 ? {} : await response.json();
     if (!response.ok) {
-      throw new Error(`HTTP ${response.status}`);
+      backendOnline = true;
+      updateBackendStatus(`Backend isteği reddetti: ${responsePayload.error || response.status}`);
+      return { ...responsePayload, httpStatus: response.status };
     }
     backendOnline = true;
     updateBackendStatus();
-    return response.status === 204 ? {} : response.json();
+    return responsePayload;
   } catch (error) {
     backendOnline = false;
     updateBackendStatus("Backend kapalı: python server.py ile açınca kayıt, log ve Word indirme aktif olur.");
@@ -769,7 +776,7 @@ async function apiLogin(email, password) {
 }
 
 function queueStateSync(reason) {
-  if (!canUseBackend() || SELF_TEST_MODE || !apiAuthToken || !isProjectManager()) {
+  if (!canUseBackend() || SELF_TEST_MODE || !apiAuthToken) {
     return false;
   }
   clearTimeout(stateSyncTimer);
@@ -777,14 +784,24 @@ function queueStateSync(reason) {
 }
 
 async function syncStateToBackend(reason = "state-sync") {
-  await apiJson("/api/state", {
+  const result = await apiJson("/api/state", {
     method: "POST",
     body: JSON.stringify({
       reason,
       actor: currentUser()?.email || "anonim",
+      revision: backendRevision,
       payload: sanitizedStateForStorage(state),
     }),
   });
+  if (result?.ok) {
+    backendRevision = Number(result.revision || backendRevision + 1);
+    session.backendRevision = backendRevision;
+    saveSession();
+  } else if (result?.error === "revision-conflict") {
+    setMaintenanceMessage("Başka bir kullanıcı daha yeni değişiklik kaydetti. Veriler yenileniyor.", "error");
+    await loadBackendStateAfterLogin();
+  }
+  return result;
 }
 
 async function logAction(action, detail = {}) {
@@ -818,6 +835,8 @@ async function loadBackendStateAfterLogin() {
   }
   const saved = await apiJson("/api/state");
   if (saved?.payload) {
+    backendRevision = Number(saved.revision || 0);
+    session.backendRevision = backendRevision;
     const currentEmail = currentUser()?.email || "";
     state = normalizeState(mergeAuthFields(saved.payload, state));
     const backendUser = state.users.find((user) => user.email.toLowerCase() === currentEmail.toLowerCase());
@@ -825,6 +844,7 @@ async function loadBackendStateAfterLogin() {
       session.userId = backendUser.id;
       saveSession();
     }
+    saveSession();
     localStorage.setItem(STORAGE_KEY, JSON.stringify(sanitizedStateForStorage(state)));
     render();
   } else if (isProjectManager()) {
@@ -1024,6 +1044,7 @@ function logout() {
   logAction("auth.logout", { actor: currentUser()?.email || "anonim" });
   apiAuthToken = "";
   apiCsrfToken = "";
+  backendRevision = 0;
   csrfToken = "";
   session = { userId: null, projectId: null, view: "admin", documentId: "fr01" };
   saveSession();
@@ -1465,7 +1486,7 @@ function renderDashboard() {
   const review = tasks.filter((task) => task.status === "review");
   const changes = tasks.filter((task) => task.status === "changes");
   const ongoing = tasks.filter((task) => task.status !== "approved");
-  const productivity = tasks.length === 0 ? 100 : Math.round((approved.length / tasks.length) * 100);
+  const productivity = tasks.length === 0 ? 0 : Math.round((approved.length / tasks.length) * 100);
 
   document.querySelector("#openTasks").textContent = ongoing.length;
   document.querySelector("#reviewTasks").textContent = review.length;
@@ -1826,7 +1847,8 @@ function addTaskComment(taskId, text) {
   const cleanText = text.trim();
   if (
     !taskBelongsToCurrentProject(task) ||
-    !cleanText ||
+    !cleanText || cleanText.length > 20000 ||
+    ["archived", "completed"].includes(currentProject()?.status) ||
     !validProjectMemberIds(currentProject()).includes(session.userId)
   ) {
     return false;
@@ -1924,7 +1946,7 @@ function createSubmitForm(task) {
 
 function submitTask(taskId, submission) {
   const task = state.tasks.find((item) => item.id === taskId);
-  if (!taskBelongsToCurrentProject(task) || task.assigneeId !== session.userId || task.status === "approved") {
+  if (!taskBelongsToCurrentProject(task) || task.assigneeId !== session.userId || task.status === "approved" || ["archived", "completed"].includes(currentProject()?.status)) {
     return false;
   }
 
@@ -1949,7 +1971,7 @@ function submitTask(taskId, submission) {
 
 function updateTaskStatus(taskId, status) {
   const task = state.tasks.find((item) => item.id === taskId);
-  if (!taskBelongsToCurrentProject(task) || !canManageProject() || !["approved", "changes"].includes(status)) {
+  if (!taskBelongsToCurrentProject(task) || !canManageProject() || ["archived", "completed"].includes(currentProject()?.status) || !["approved", "changes"].includes(status)) {
     return false;
   }
   task.status = status;
@@ -2794,13 +2816,13 @@ function renderTemplateQuestions() {
 
 function createTask(formData) {
   const project = currentProject();
-  if (!project || !canAssignTasks() || !formData.assigneeId) {
+  if (!project || !canAssignTasks() || !formData.assigneeId || ["archived", "completed"].includes(project.status)) {
     return false;
   }
 
   const title = formData.title.trim();
   const description = formData.description.trim();
-  if (!title || !description || !project.memberIds.includes(formData.assigneeId)) {
+  if (!title || title.length > 300 || !description || description.length > 20000 || !project.memberIds.includes(formData.assigneeId)) {
     return false;
   }
   const priority = ALLOWED_PRIORITIES.has(formData.priority) ? formData.priority : "normal";
@@ -2985,7 +3007,14 @@ function deleteSystemUser(userId) {
     delete project.memberProfiles[userId];
   });
   state.invites = state.invites.filter((invite) => invite.userId !== userId);
-  state.users = state.users.filter((user) => user.id !== userId);
+  const deletedUser = state.users.find((user) => user.id === userId);
+  if (deletedUser) {
+    deletedUser.name = "Silinmiş kullanıcı";
+    deletedUser.deleted = true;
+    deletedUser.password = "";
+    delete deletedUser.passwordHash;
+    delete deletedUser.passwordSalt;
+  }
   state.tasks.forEach((task) => {
     if (task.assigneeId === userId) {
       const project = state.projects.find((item) => item.id === task.projectId);

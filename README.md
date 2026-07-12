@@ -1,114 +1,145 @@
 # Proje Yönetimi
 
-Mail ve şifre ile giriş yapılan, proje seçimi olan, adminlerin ekip kurup görev
-atayabildiği yerel web prototipi.
+[![CI](https://github.com/Alibehram11/Project_Management/actions/workflows/ci.yml/badge.svg)](https://github.com/Alibehram11/Project_Management/actions/workflows/ci.yml)
+[![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB)](https://www.python.org/)
+[![License](https://img.shields.io/badge/license-MIT-black.svg)](LICENSE)
 
-## Açma
+Ekiplerin projeleri, görevleri, teslimleri, takvimi ve öğrenci belgelerini tek
+ekrandan yönetebilmesi için geliştirilmiş, SQLite destekli bir web uygulaması.
+Uygulama standart Python WSGI arayüzüyle çalışır ve PythonAnywhere üzerinde
+harici backend paketi olmadan yayımlanabilir.
 
-Tam özellikli kullanım için:
+> [!WARNING]
+> Bu depo eğitim ve test amacıyla sekiz açık metin demo şifresi içerir. Demo
+> hesaplarını gerçek kullanıcı verileriyle veya internete açık üretim ortamında
+> kullanmayın. Üretim kullanımı öncesinde şifre hashing ve kalıcı session
+> altyapısına geçilmelidir.
+
+## Öne Çıkanlar
+
+- E-posta ve şifre ile giriş, kayıt ve giriş sonrası proje seçimi
+- Ana admin, proje admini, ekip kaptanı ve üye yetkileri
+- Projeye kullanıcı ekleme, görev atama, checklist, yorum ve dosya teslimi
+- Görev onayı, düzeltme talebi, takvim, CRM, ekip akışı ve rapor ekranları
+- Web üzerinden doldurulup `.docx` olarak indirilebilen 10 Word şablonu
+- Proje içinden erişilen Atölye envanteri ve kullanıcıya özel talepler
+- SQLite state, revision, snapshot, audit log ve kalıcı bildirim outbox kaydı
+- Proje kapsamlı API yetkilendirmesi, CSRF, origin/host ve rate-limit kontrolleri
+- Optimistic concurrency, soft delete, çöp kutusu ve veri bütünlüğü kuralları
+- Görevlerin CSV ve PDF olarak dışa aktarılması
+
+## Mimari
+
+```text
+Project_Management/
+├── server.py                 # HTTP + WSGI API, SQLite ve güvenlik katmanı
+├── advanced_rules.py         # Yetki, bütünlük, pagination ve export kuralları
+├── app.js                    # Tarayıcı uygulaması ve kullanıcı iş akışları
+├── index.html
+├── styles.css
+├── security_tests.py         # 53 güvenlik/regresyon senaryosu
+├── advanced_tests.py         # 30 ileri seviye iş kuralı ve yük senaryosu
+├── wsgi.py                   # PythonAnywhere WSGI giriş noktası
+├── integrations/atolye/      # Atölye kaynak entegrasyonu
+└── proje_yonetimi_ogrenci_belgeleri_word/  # 10 DOCX şablonu
+```
+
+Frontend, kullanıcı deneyimi için tarayıcı depolamasını kullanır. Backend açıkken
+durum SQLite'a revision numarasıyla atomik olarak yazılır. Sunucu, gönderilen
+state verisini kullanıcıya ait proje kapsamıyla birleştirir; arayüzde saklanan
+bir düğmeye veya istemcinin bildirdiği role güvenmez.
+
+## Hızlı Başlangıç
+
+Gereksinim: Python 3.10 veya üzeri. Önerilen sürüm Python 3.12'dir.
 
 ```powershell
+git clone https://github.com/Alibehram11/Project_Management.git
+cd Project_Management
+python server.py --check
 python server.py
 ```
 
-Sonra tarayıcıda `http://127.0.0.1:8765` adresini aç.
+Ardından `http://127.0.0.1:8765` adresini açın.
 
-Sadece arayüzü görmek için `index.html` dosyası doğrudan açılabilir; bu modda
-SQLite kayıt, log ve Word indirme çalışmaz.
+Ana uygulama yalnızca Python standart kütüphanesini kullanır. Bu nedenle
+`requirements.txt` bilerek boş tutulmuştur. Atölye kaynak uygulamasını bağımsız
+çalıştırmak isterseniz kendi `integrations/atolye/requirements.txt` dosyasını
+kullanın.
 
-Test için giriş ekranında 8 demo hesap bulunur. Bu test sürümünde şifre alanı
-bilerek açık metin olarak state/veritabanı içinde tutulur.
+## Demo Hesapları
 
-Demo hesapları:
+Tüm demo hesaplarının şifresi `123456` değeridir.
 
-- Ana admin: `admin@proje.local` / `123456`
-- Yazılım kaptanı: `yazilim@proje.local` / `123456`
-- Yazılım üyesi: `yazilim2@proje.local` / `123456`
-- Tasarım üyesi: `tasarim@proje.local` / `123456`
-- Mekanik kaptanı: `mekanik@proje.local` / `123456`
-- Elektronik üyesi: `elektronik@proje.local` / `123456`
-- Mentor admin: `mentor@proje.local` / `123456`
-- Atölye admin: `atolye@proje.local` / `123456`
+| Rol | E-posta |
+| --- | --- |
+| Ana admin | `admin@proje.local` |
+| Yazılım kaptanı | `yazilim@proje.local` |
+| Yazılım üyesi | `yazilim2@proje.local` |
+| Tasarım üyesi | `tasarim@proje.local` |
+| Mekanik kaptanı | `mekanik@proje.local` |
+| Elektronik üyesi | `elektronik@proje.local` |
+| Mentor admin | `mentor@proje.local` |
+| Atölye admin | `atolye@proje.local` |
 
-## Bu sürümde olanlar
+## Testler
 
-- Düzenlenmiş ana giriş ekranı
-- Girişten sonra önce proje seçme ekranı
-- Panel içinden proje değiştirme akışı
-- Admin panelinde proje listesi
-- Kayıt olmuş kişiyi projeye doğrudan ekleme
-- Eklenen kişiye hemen görev atayabilme
-- Ana admin, admin, ekip kaptanı ve üye rolleri
-- Ekip kaptanının kendi ekibindeki kişilere görev verebilmesi
-- Görev tesliminde not ve dosya yükleme
-- Adminin teslimi onaylaması veya düzeltme istemesi
-- Proje takvimi girişi
-- CRM fırsatları ekranı
-- Takım akışı ekranı
-- Yönetim raporları ekranı
-- Benim işlerim ekranı
-- Gelen kutusu ekranı
-- Görev önceliği, etiketi ve tahmini süre alanları
-- Görev checklist'i
-- Görev yorumları
-- `proje_yonetimi_ogrenci_belgeleri_word` klasöründeki 10 Word belgesinin site
-  içinde doldurulabilir form şablonu olarak eklenmesi
-- Ana adminin belge sorularını düzenleyebilmesi
-- Web formunda doldurulan belgeyi `.docx` olarak indirebilme
-- Verilen Word şablonlarının arka planda kontrol edilmesi
-- Admin panelinde kullanıcı ekleme, projeden çıkarma ve sistemden silme
-- SQLite veritabanına state, snapshot ve log kaydı
-- Admin için sistem logları ve müdahale araçları
-- JSON yedek indirme, veritabanından geri yükleme ve veri onarma
-- Siyah-beyaz, hareketli ve tıklanabilir yeni verimlilik paneli
-- Proje içinde Atölye sekmesi
-- `Alibehram11/Atolye` kaynaklarının `integrations/atolye` altında saklanması
-- Test için açık metin şifreli 8 demo hesap
-- Same-origin CORS ve CSRF token kontrolü
-
-Not: Bitrix24 gibi kapsamlı iş yönetimi araçlarından esinlenen CRM, akış ve
-raporlama modülleri eklendi; marka, arayüz ve ürün birebir kopyalanmaz.
-
-Veriler tarayıcı `localStorage` alanında tutulmaya devam eder; backend ile
-açıldığında aynı veri `app_data.sqlite3` dosyasına da kaydedilir. Word indirme
-akışı verilen şablon dosyasını doğrular ve cevapları yeni bir `.docx` dosyasına
-yazar.
-
-## İncelenen benzer uygulamalar
-
-- Asana: görev sahipliği, son tarih, proje görünümleri, özel alanlar, zaman
-  takibi, benim görevlerim ve raporlama yaklaşımından esinlenildi.
-- Trello: kart/pano mantığı, etiketler ve checklist yaklaşımından esinlenildi.
-- ClickUp: görev, doküman, dashboard, yorum/chat, otomasyon ve zaman takibi
-  yaklaşımından esinlenildi.
-
-## Atölye entegrasyonu
-
-`integrations/atolye` klasörü `Alibehram11/Atolye` reposundan alınan Flask tabanlı
-robotik atölye envanter uygulamasını içerir. Ana uygulamada bunun hafif,
-kullanıcı hesabıyla girilen ve proje paneliyle uyumlu bir ekranı vardır:
-
-- Proje içindeki `Atölye` sekmesi
-- Envanter stokları
-- Parça talep formu
-- Adminler için talep onaylama/reddetme
-
-## Test
-
-Backend kontrolü:
+Tam doğrulama:
 
 ```powershell
+python security_tests.py
+python advanced_tests.py
 python server.py --check
+python -m py_compile server.py advanced_rules.py security_tests.py advanced_tests.py wsgi.py
 ```
 
-Atölye kaynak kontrolü:
+Beklenen sonuç:
 
-```powershell
-python -m py_compile integrations/atolye/app.py integrations/atolye/models.py integrations/atolye/create_sample_excel.py
+- Güvenlik/regresyon testleri: `53/53 PASS`
+- İleri seviye senaryolar: `30/30 PASS`
+- Word şablon kontrolü: `10/10`
+
+Tarayıcı iş akışlarını kontrol etmek için uygulamayı
+`http://127.0.0.1:8765/?selftest=1` adresinde açabilirsiniz.
+
+## Güvenlik Modeli
+
+- Bearer session ve session başına CSRF token
+- Her istekte güncel kullanıcı ve proje üyeliği doğrulaması
+- Sistem admini ve proje admini işlemlerinin ayrılması
+- IDOR'a karşı kullanıcıya özel state filtreleme
+- Revision tabanlı eşzamanlı güncelleme kontrolü
+- JSON boyut, derinlik, anahtar ve kontrol karakteri sınırları
+- DOCX makro, dış ilişki, XML/DTD, traversal ve ZIP bombası kontrolleri
+- SQL sorgularında parametre kullanımı ve güvenli hata yanıtları
+- Thread-safe rate limiter ve tekrar denenebilir SQLite outbox
+
+Güvenlik açığı bildirimleri için [SECURITY.md](SECURITY.md) dosyasını inceleyin.
+
+## PythonAnywhere
+
+Elle yükleme ve WSGI kurulumu için [PYTHONANYWHERE.md](PYTHONANYWHERE.md)
+rehberini kullanın. Temel WSGI yapılandırması:
+
+```python
+import sys
+
+path = "/home/KULLANICI_ADIN/Project_Management"
+if path not in sys.path:
+    sys.path.insert(0, path)
+
+from server import application
 ```
 
-Tarayıcıda `index.html?selftest=1` açılırsa gizli self-test çalışır. Bu test
-admin görev atama, her üyeye görev atama, üye ekleme, kaptan yetkisi, normal üye
-paneli, takvim, belge cevap kaydı, belge soru düzenleme, checklist, yorum,
-benim işlerim, gelen kutusu, metrik tutarlılığı ve hatalı/boş veri akışlarını
-kontrol eder. Son doğrulamada 83 tutarlılık kontrolü geçti.
+Özel alan adı kullanıyorsanız `PROJECT_ALLOWED_HOSTS` ortam değişkenine alan
+adınızı ekleyin.
+
+## Katkı
+
+Katkı adımları ve zorunlu kontroller için [CONTRIBUTING.md](CONTRIBUTING.md)
+dosyasına bakın. Atölye entegrasyonu ayrı kaynak yapısını korur; ana uygulama
+değişiklikleri entegrasyon koduyla gereksiz yere birleştirilmemelidir.
+
+## Lisans
+
+Bu proje [MIT Lisansı](LICENSE) ile yayımlanır.
