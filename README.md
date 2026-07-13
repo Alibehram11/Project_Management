@@ -39,6 +39,7 @@ Project_Management/
 ├── styles.css
 ├── security_tests.py         # 53 güvenlik/regresyon senaryosu
 ├── advanced_tests.py         # 30 ileri seviye iş kuralı ve yük senaryosu
+├── security_advanced_tests.py # 29 ileri seviye güvenlik senaryosu
 ├── wsgi.py                   # PythonAnywhere WSGI giriş noktası
 ├── integrations/atolye/      # Atölye kaynak entegrasyonu
 └── proje_yonetimi_ogrenci_belgeleri_word/  # 10 DOCX şablonu
@@ -89,14 +90,16 @@ Tam doğrulama:
 ```powershell
 python security_tests.py
 python advanced_tests.py
+python security_advanced_tests.py
 python server.py --check
-python -m py_compile server.py advanced_rules.py security_tests.py advanced_tests.py wsgi.py
+python -m py_compile server.py advanced_rules.py security_tests.py advanced_tests.py security_advanced_tests.py wsgi.py
 ```
 
 Beklenen sonuç:
 
 - Güvenlik/regresyon testleri: `53/53 PASS`
 - İleri seviye senaryolar: `30/30 PASS`
+- İleri seviye güvenlik senaryoları: `29/29 PASS`
 - Word şablon kontrolü: `10/10`
 
 Tarayıcı iş akışlarını kontrol etmek için uygulamayı

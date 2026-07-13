@@ -1041,7 +1041,14 @@ async function registerUser(name, email, password) {
 }
 
 function logout() {
-  logAction("auth.logout", { actor: currentUser()?.email || "anonim" });
+  const actor = currentUser()?.email || "anonim";
+  logAction("auth.logout", { actor });
+  if (apiAuthToken && apiCsrfToken) {
+    void apiJson("/api/auth/logout", {
+      method: "POST",
+      body: JSON.stringify({}),
+    });
+  }
   apiAuthToken = "";
   apiCsrfToken = "";
   backendRevision = 0;

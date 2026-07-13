@@ -33,7 +33,8 @@ jobs:
       - name: Compile Python sources
         run: >-
           python -m py_compile
-          server.py advanced_rules.py security_tests.py advanced_tests.py wsgi.py
+          server.py advanced_rules.py security_tests.py advanced_tests.py
+          security_advanced_tests.py wsgi.py
           integrations/atolye/app.py integrations/atolye/models.py
 
       - name: Run security regression suite
@@ -41,6 +42,9 @@ jobs:
 
       - name: Run advanced scenario suite
         run: python advanced_tests.py
+
+      - name: Run advanced security suite
+        run: python security_advanced_tests.py
 
       - name: Validate runtime and Word templates
         run: python server.py --check

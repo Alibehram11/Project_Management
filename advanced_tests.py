@@ -167,6 +167,12 @@ def run() -> None:
 
     def t06():
         ctx = fresh(); token = server.issue_password_reset("tasarim@proje.local", 60)
+        token_hash = hashlib.sha256(token.encode()).hexdigest()
+        if server.consume_password_reset(token, "123") or token_hash not in server.PASSWORD_RESET_TOKENS:
+            raise AssertionError("invalid password submission consumed reset token")
+        if not server.consume_password_reset(token, "654321"):
+            raise AssertionError("valid password could not reuse retained reset token")
+        token = server.issue_password_reset("tasarim@proje.local", 60)
         if not server.consume_password_reset(token, "654321") or server.consume_password_reset(token, "again12"):
             raise AssertionError("reset token was not single-use")
         expired = server.issue_password_reset("tasarim@proje.local", 1)
@@ -213,13 +219,13 @@ def run() -> None:
 
     def t12():
         state = base_state(); state["tasks"][0]["dependencyIds"] = ["t3"]
-        state["tasks"].append({"id": "t3", "projectId": "p1", "assigneeId": "demo-admin", "dependencyIds": ["t1"]})
+        state["tasks"].append({"id": "t3", "projectId": "p1", "assigneeId": "demo-admin", "status": "todo", "dependencyIds": ["t1"]})
         expect_domain("task-dependency-cycle", lambda: validate_state(state))
     add("12 circular task dependency is rejected", t12)
 
     def t13():
         state = base_state(); state["tasks"][0]["dueDate"] = "2026-08-10"
-        state["tasks"].append({"id": "child", "projectId": "p1", "assigneeId": "demo-admin", "parentTaskId": "t1", "dueDate": "2026-08-11", "dependencyIds": []})
+        state["tasks"].append({"id": "child", "projectId": "p1", "assigneeId": "demo-admin", "status": "todo", "parentTaskId": "t1", "dueDate": "2026-08-11", "dependencyIds": []})
         expect_domain("subtask-deadline-invalid", lambda: validate_state(state))
     add("13 subtask cannot end after parent", t13)
 

@@ -303,7 +303,7 @@ def run() -> None:
         status, headers, body = request(
             "POST",
             "/api/docx/export",
-            {"templateId": "fr01", "projectName": "Guvenlik Testi", "title": "Rapor", "questions": ["Sonuc"], "answers": {"q0": "Basarili"}},
+            {"projectId": "project-1", "templateId": "fr01", "projectName": "Guvenlik Testi", "title": "Rapor", "questions": ["Sonuc"], "answers": {"q0": "Basarili"}},
             context["admin"],
         )
         expect_status("valid export", status, "200")

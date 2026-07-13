@@ -4,6 +4,7 @@ import copy
 import csv
 import io
 import json
+import math
 from datetime import datetime, timezone
 from typing import Callable, Iterable
 
@@ -11,6 +12,25 @@ from typing import Callable, Iterable
 PROJECT_COLLECTIONS = ("tasks", "invites", "calendarEvents", "crmItems", "feedItems")
 TASK_MEMBER_FIELDS = {"status", "comments", "submissions", "checklist", "updatedAt", "version"}
 TEXT_LIMITS = {"title": 300, "description": 20_000, "text": 20_000, "note": 20_000}
+TASK_STATUSES = {"todo", "review", "approved", "changes"}
+TASK_REVIEW_TRANSITIONS = {"review": {"approved", "changes"}}
+RESERVED_CLIENT_FIELDS = {"isOwner", "isVerified", "permissions", "systemRole"}
+SENSITIVE_RESPONSE_FIELDS = {
+    "password", "passwordHash", "passwordSalt", "resetToken", "refreshToken",
+    "accessToken", "oauthToken", "apiKey", "clientSecret", "authorization",
+    "csrf", "csrfToken",
+}
+SENSITIVE_RESPONSE_FIELD_KEYS = {field.casefold() for field in SENSITIVE_RESPONSE_FIELDS}
+FORBIDDEN_SECRET_FIELDS = {"refreshToken", "accessToken", "oauthToken", "apiKey", "clientSecret"}
+FORBIDDEN_SECRET_FIELD_KEYS = {field.casefold() for field in FORBIDDEN_SECRET_FIELDS}
+NUMERIC_LIMITS = {
+    "budget": 1_000_000_000_000,
+    "duration": 1_000_000_000,
+    "estimateHours": 100_000,
+    "quantity": 1_000_000_000,
+    "storyPoints": 1_000_000,
+}
+MAX_TASK_NESTING = 16
 
 
 class DomainError(ValueError):
@@ -32,6 +52,18 @@ def item_map(items: object) -> dict[str, dict]:
         for item in items
         if isinstance(item, dict) and item.get("id")
     }
+
+
+def redact_sensitive_fields(value: object) -> object:
+    if isinstance(value, dict):
+        return {
+            key: redact_sensitive_fields(item)
+            for key, item in value.items()
+            if str(key).casefold() not in SENSITIVE_RESPONSE_FIELD_KEYS
+        }
+    if isinstance(value, list):
+        return [redact_sensitive_fields(item) for item in value]
+    return copy.deepcopy(value)
 
 
 def is_system_admin(session: dict) -> bool:
@@ -86,7 +118,7 @@ def visible_state(state: dict, session: dict) -> dict:
             public_user.pop(key, None)
         result["users"].append(public_user)
     if is_system_admin(session):
-        return result
+        return redact_sensitive_fields(result)
     for key in PROJECT_COLLECTIONS:
         result[key] = [
             copy.deepcopy(item)
@@ -107,7 +139,7 @@ def visible_state(state: dict, session: dict) -> dict:
             if isinstance(request, dict) and str(request.get("createdBy")) == user_id
         ]
     result["trash"] = []
-    return result
+    return redact_sensitive_fields(result)
 
 
 def parse_utc(value: object) -> datetime:
@@ -136,12 +168,41 @@ def _check_text_limits(value: object) -> None:
             _check_text_limits(item)
 
 
+def _check_untrusted_fields(value: object) -> None:
+    if isinstance(value, dict):
+        for key, item in value.items():
+            normalized_key = str(key).casefold()
+            if normalized_key in {field.casefold() for field in RESERVED_CLIENT_FIELDS}:
+                raise DomainError("mass-assignment-denied", 403)
+            if normalized_key in FORBIDDEN_SECRET_FIELD_KEYS and item is not None and item != "":
+                raise DomainError("secret-storage-denied")
+            if key in NUMERIC_LIMITS:
+                if isinstance(item, bool):
+                    raise DomainError("numeric-value-invalid")
+                try:
+                    number = float(item)
+                except (TypeError, ValueError):
+                    raise DomainError("numeric-value-invalid") from None
+                if not math.isfinite(number) or number < 0 or number > NUMERIC_LIMITS[key]:
+                    raise DomainError("numeric-value-invalid")
+            _check_untrusted_fields(item)
+    elif isinstance(value, list):
+        for item in value:
+            _check_untrusted_fields(item)
+
+
 def _validate_task_graph(tasks: list[dict]) -> None:
     tasks_by_id = item_map(tasks)
     graph: dict[str, list[str]] = {}
     for task_id, task in tasks_by_id.items():
+        if task.get("status") not in TASK_STATUSES:
+            raise DomainError("task-status-invalid")
         dependencies = [str(value) for value in task.get("dependencyIds", [])]
-        if task_id in dependencies or any(value not in tasks_by_id for value in dependencies):
+        if task_id in dependencies or any(
+            value not in tasks_by_id
+            or str(tasks_by_id[value].get("projectId")) != str(task.get("projectId"))
+            for value in dependencies
+        ):
             raise DomainError("task-dependency-invalid")
         graph[task_id] = dependencies
         parent_id = str(task.get("parentTaskId") or "")
@@ -152,28 +213,43 @@ def _validate_task_graph(tasks: list[dict]) -> None:
             if task.get("dueDate") and parent.get("dueDate") and parse_utc(task["dueDate"]) > parse_utc(parent["dueDate"]):
                 raise DomainError("subtask-deadline-invalid")
 
-    visiting: set[str] = set()
-    visited: set[str] = set()
+        depth = 0
+        seen_parents = {task_id}
+        while parent_id:
+            if parent_id in seen_parents:
+                raise DomainError("parent-task-invalid")
+            parent_task = tasks_by_id.get(parent_id)
+            if not parent_task:
+                raise DomainError("parent-task-invalid")
+            seen_parents.add(parent_id)
+            depth += 1
+            if depth > MAX_TASK_NESTING:
+                raise DomainError("task-depth-exceeded")
+            parent_id = str(parent_task.get("parentTaskId") or "")
 
-    def visit(task_id: str) -> None:
-        if task_id in visiting:
-            raise DomainError("task-dependency-cycle")
-        if task_id in visited:
-            return
-        visiting.add(task_id)
-        for dependency_id in graph.get(task_id, []):
-            visit(dependency_id)
-        visiting.remove(task_id)
-        visited.add(task_id)
-
-    for task_id in graph:
-        visit(task_id)
+    dependents: dict[str, list[str]] = {task_id: [] for task_id in graph}
+    indegree = {task_id: len(dependencies) for task_id, dependencies in graph.items()}
+    for task_id, dependencies in graph.items():
+        for dependency_id in dependencies:
+            dependents[dependency_id].append(task_id)
+    ready = [task_id for task_id, count in indegree.items() if count == 0]
+    processed = 0
+    while ready:
+        task_id = ready.pop()
+        processed += 1
+        for dependent_id in dependents[task_id]:
+            indegree[dependent_id] -= 1
+            if indegree[dependent_id] == 0:
+                ready.append(dependent_id)
+    if processed != len(graph):
+        raise DomainError("task-dependency-cycle")
 
 
 def validate_state(state: dict) -> dict:
     if not isinstance(state, dict):
         raise DomainError("state-invalid")
     _check_text_limits(state)
+    _check_untrusted_fields(state)
     users = item_map(state.get("users"))
     projects = item_map(state.get("projects"))
     emails: set[str] = set()
@@ -206,6 +282,29 @@ def validate_state(state: dict) -> dict:
             raise DomainError("task-assignee-invalid")
     _validate_task_graph(tasks)
     return state
+
+
+def _validate_task_workflow(current: dict, incoming: dict, session: dict) -> None:
+    current_tasks = item_map(current.get("tasks"))
+    incoming_tasks = item_map(incoming.get("tasks"))
+    projects = item_map(current.get("projects")) | item_map(incoming.get("projects"))
+    user_id = str(session.get("userId") or "")
+
+    for task_id, task in incoming_tasks.items():
+        before = current_tasks.get(task_id)
+        if not before:
+            if task.get("status") != "todo":
+                raise DomainError("task-workflow-invalid", 409)
+            continue
+        old_status, new_status = before.get("status"), task.get("status")
+        if old_status == new_status:
+            continue
+        if str(before.get("assigneeId")) == user_id and old_status in {"todo", "changes"} and new_status == "review":
+            continue
+        role = project_role(projects.get(str(before.get("projectId"))), user_id)
+        if (is_system_admin(session) or role in {"owner", "admin"}) and new_status in TASK_REVIEW_TRANSITIONS.get(old_status, set()):
+            continue
+        raise DomainError("task-workflow-invalid", 409)
 
 
 def _changed_fields(before: dict, after: dict) -> set[str]:
@@ -401,6 +500,8 @@ def prepare_state_transition(
             if key not in user and key in old_user:
                 user[key] = old_user[key]
     _authorize_transition(current, candidate, session)
+    if current.get("projects"):
+        _validate_task_workflow(current, candidate, session)
     _apply_archive_lock(current, candidate)
     _apply_cascade_and_trash(current, candidate, str(session.get("email") or "unknown"))
     _preserve_deleted_users(current, candidate)
