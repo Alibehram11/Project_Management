@@ -37,8 +37,8 @@ Project_Management/
 ├── app.js                    # Tarayıcı uygulaması ve kullanıcı iş akışları
 ├── index.html
 ├── styles.css
-├── security_tests.py         # 53 güvenlik/regresyon senaryosu
-├── advanced_tests.py         # 30 ileri seviye iş kuralı ve yük senaryosu
+├── security_tests.py         # 54 güvenlik/regresyon senaryosu
+├── advanced_tests.py         # 32 ileri seviye iş kuralı ve yük senaryosu
 ├── security_advanced_tests.py # 29 ileri seviye güvenlik senaryosu
 ├── wsgi.py                   # PythonAnywhere WSGI giriş noktası
 ├── integrations/atolye/      # Atölye kaynak entegrasyonu
@@ -97,8 +97,8 @@ python -m py_compile server.py advanced_rules.py security_tests.py advanced_test
 
 Beklenen sonuç:
 
-- Güvenlik/regresyon testleri: `53/53 PASS`
-- İleri seviye senaryolar: `30/30 PASS`
+- Güvenlik/regresyon testleri: `54/54 PASS`
+- İleri seviye senaryolar: `32/32 PASS`
 - İleri seviye güvenlik senaryoları: `29/29 PASS`
 - Word şablon kontrolü: `10/10`
 

@@ -617,6 +617,22 @@ textarea:focus {
   min-width: 0;
 }
 
+.permission-controls {
+  display: grid;
+  grid-template-columns: minmax(110px, 1fr) minmax(110px, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+}
+
+.permission-controls select {
+  min-width: 0;
+  padding: 8px 9px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel);
+  color: var(--ink);
+}
+
 .admin-list-item span,
 .log-item span,
 .log-item p {
@@ -1234,6 +1250,15 @@ dialog::backdrop {
   .admin-list-item {
     grid-template-columns: 1fr;
     display: grid;
+  }
+
+  .permission-controls {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .permission-controls button {
+    grid-column: 1 / -1;
+    justify-self: start;
   }
 
   .member-row {

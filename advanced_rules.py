@@ -93,6 +93,7 @@ def managed_project_ids(state: dict, session: dict) -> set[str]:
 
 def visible_state(state: dict, session: dict) -> dict:
     user_id = str(session.get("userId") or "")
+    managed_ids = managed_project_ids(state, session)
     if is_system_admin(session):
         result = copy.deepcopy(state)
         projects = result.get("projects", [])
@@ -107,6 +108,14 @@ def visible_state(state: dict, session: dict) -> dict:
     visible_user_ids = {user_id}
     for project in projects:
         visible_user_ids.update(str(value) for value in project.get("memberIds", []))
+    if managed_ids:
+        # Project managers need the registered-user directory to invite people
+        # into their own project. Project data remains project-scoped below.
+        visible_user_ids.update(
+            str(user.get("id"))
+            for user in state.get("users", [])
+            if isinstance(user, dict) and not user.get("deleted")
+        )
     result["projects"] = projects
     source_users = state.get("users", []) if not is_system_admin(session) else result.get("users", [])
     result["users"] = []

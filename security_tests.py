@@ -312,6 +312,14 @@ def run() -> None:
 
     add("53 valid provided template exports as DOCX", valid_docx_export_works)
 
+    def frontend_role_controls_exist():
+        text = Path("app.js").read_text(encoding="utf-8")
+        markup = Path("index.html").read_text(encoding="utf-8")
+        if "function updateProjectMemberRole" not in text or "data-member-role" not in text or "adminUserPermissionHint" not in markup:
+            raise AssertionError("project role assignment controls are missing")
+
+    add("54 frontend exposes project role assignment controls", frontend_role_controls_exist)
+
     passed = []
     configure_test_backend(Path(".security_test_runtime"))
     for name, fn in tests:

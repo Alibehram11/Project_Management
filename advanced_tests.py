@@ -361,6 +361,31 @@ def run() -> None:
             raise AssertionError("trash restore incomplete")
     add("30 soft-deleted project can be restored with children", t30)
 
+    def t31():
+        ctx = fresh(); state, rev = get_state(ctx["admin"])
+        project = next(p for p in state["projects"] if p["id"] == "p1")
+        project["memberProfiles"]["demo-tasarim"]["role"] = "lead"
+        expect_status("assign lead role", post_state(ctx["admin"], state, rev)[0], "200")
+        refreshed, _ = get_state(ctx["member"])
+        profile = next(p for p in refreshed["projects"] if p["id"] == "p1")["memberProfiles"]["demo-tasarim"]
+        if profile["role"] != "lead":
+            raise AssertionError("admin role assignment was not persisted")
+    add("31 system admin can assign project roles", t31)
+
+    def t32():
+        ctx = fresh(); state, rev = get_state(ctx["mentor"])
+        if not any(user["id"] == "demo-yazilim" for user in state["users"]):
+            raise AssertionError("project manager cannot see registered users to invite")
+        project = next(p for p in state["projects"] if p["id"] == "p2")
+        project["memberIds"].append("demo-yazilim")
+        project["memberProfiles"]["demo-yazilim"] = {"role": "member", "team": "Yazılım", "title": "Yazılım ekibi"}
+        expect_status("mentor invite", post_state(ctx["mentor"], state, rev)[0], "200")
+        refreshed, _ = get_state(ctx["admin"])
+        project = next(p for p in refreshed["projects"] if p["id"] == "p2")
+        if "demo-yazilim" not in project["memberIds"]:
+            raise AssertionError("mentor project member invite was not persisted")
+    add("32 project admin can add a registered user to the project", t32)
+
     passed = []
     for name, fn in tests:
         fn(); passed.append(name); print(f"PASS {name}")

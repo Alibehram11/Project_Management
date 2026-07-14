@@ -919,21 +919,33 @@ function roleFor(project, userId) {
 }
 
 function canManageProject() {
+  if (isSystemAdmin()) {
+    return Boolean(currentProject());
+  }
   const role = roleFor(currentProject(), session.userId);
   return role === "owner" || role === "admin";
 }
 
 function canAssignTasks() {
+  if (isSystemAdmin()) {
+    return Boolean(currentProject());
+  }
   const role = roleFor(currentProject(), session.userId);
   return role === "owner" || role === "admin" || role === "lead";
 }
 
 function isProjectManager() {
+  if (isSystemAdmin()) {
+    return Boolean(currentProject());
+  }
   const role = roleFor(currentProject(), session.userId);
   return role === "owner" || role === "admin";
 }
 
 function canEditTemplates() {
+  if (isSystemAdmin()) {
+    return Boolean(currentProject());
+  }
   return roleFor(currentProject(), session.userId) === "owner";
 }
 
@@ -1288,15 +1300,30 @@ function renderAdmin() {
 function renderAdminUsers() {
   const list = document.querySelector("#adminUserList");
   const label = document.querySelector("#adminUserCountLabel");
+  const userForm = document.querySelector("#adminUserForm");
+  const userHint = document.querySelector("#adminUserPermissionHint");
   if (!list || !label) {
     return;
+  }
+
+  const activeProject = currentProject();
+  const canEditRoles = Boolean(activeProject && (isSystemAdmin() || canManageProject()));
+  if (userForm) {
+    userForm.classList.toggle("hidden", !isSystemAdmin());
+  }
+  if (userHint) {
+    userHint.textContent = isSystemAdmin()
+      ? "Ana admin, aktif projedeki üye rollerini aşağıdan değiştirebilir."
+      : "Yeni hesapları ana admin oluşturur; kayıtlı kullanıcıları aktif projeye Üye ekle düğmesiyle davet edebilirsiniz.";
   }
 
   label.textContent = `${state.users.length} kullanıcı`;
   list.innerHTML = "";
   state.users.forEach((user) => {
-    const activeProject = currentProject();
     const isMember = activeProject?.memberIds.includes(user.id);
+    const projectRole = isMember ? roleFor(activeProject, user.id) : "none";
+    const profile = isMember ? profileFor(activeProject, user.id) : null;
+    const isOwner = user.id === activeProject?.ownerId;
     const item = document.createElement("article");
     item.className = "admin-list-item";
     item.innerHTML = `
@@ -1304,13 +1331,40 @@ function renderAdminUsers() {
         <strong></strong>
         <span></span>
       </div>
+      <div class="permission-controls">
+        <select data-member-role aria-label="Proje rolü">
+          <option value="member">Üye</option>
+          <option value="lead">Ekip kaptanı</option>
+          <option value="admin">Admin</option>
+        </select>
+        <select data-member-team aria-label="Proje ekibi">
+          <option value="Yazılım">Yazılım</option>
+          <option value="Tasarım">Tasarım</option>
+          <option value="Mekanik">Mekanik</option>
+          <option value="Elektronik">Elektronik</option>
+          <option value="Yönetim">Yönetim</option>
+        </select>
+        <button class="secondary-action small" data-save-role type="button">Yetkiyi kaydet</button>
+      </div>
       <div class="row-actions">
         <button class="secondary-action small" data-remove-project type="button">Projeden çıkar</button>
         <button class="secondary-action small danger-action" data-delete-user type="button">Sistemden sil</button>
       </div>
     `;
     item.querySelector("strong").textContent = user.name;
-    item.querySelector("span").textContent = `${user.email} · ${isMember ? "bu projede" : "projede değil"}`;
+    item.querySelector("span").textContent = `${user.email} · ${isMember ? roleLabel(projectRole) : "projede değil"}`;
+
+    const roleSelect = item.querySelector("[data-member-role]");
+    const teamSelect = item.querySelector("[data-member-team]");
+    const saveRoleButton = item.querySelector("[data-save-role]");
+    roleSelect.value = projectRole === "owner" ? "admin" : projectRole;
+    teamSelect.value = profile?.team || "Yönetim";
+    roleSelect.disabled = !canEditRoles || !isMember || isOwner;
+    teamSelect.disabled = !canEditRoles || !isMember;
+    saveRoleButton.disabled = !canEditRoles || !isMember || isOwner;
+    saveRoleButton.addEventListener("click", () => {
+      updateProjectMemberRole(user.id, roleSelect.value, teamSelect.value);
+    });
 
     const removeProjectButton = item.querySelector("[data-remove-project]");
     removeProjectButton.disabled = !isMember || user.id === activeProject?.ownerId || user.id === session.userId;
@@ -2895,6 +2949,33 @@ function addUserToProject(project, userId, role, team) {
   if (safeRole !== "admin") {
     project.adminIds = project.adminIds.filter((adminId) => adminId !== userId);
   }
+}
+
+function updateProjectMemberRole(userId, role, team) {
+  const project = currentProject();
+  if (!project || !canManageProject() || !project.memberIds.includes(userId) || !ALLOWED_ROLES.has(role) || !ALLOWED_TEAMS.has(team)) {
+    return false;
+  }
+  if (project.ownerId === userId) {
+    return false;
+  }
+
+  project.memberProfiles[userId] = {
+    ...(project.memberProfiles[userId] || {}),
+    role,
+    team,
+    title: role === "admin" ? "Admin" : role === "lead" ? `${team} kaptanlığı` : `${team} ekibi`,
+  };
+  if (role === "admin" && !project.adminIds.includes(userId)) {
+    project.adminIds.push(userId);
+  }
+  if (role !== "admin") {
+    project.adminIds = project.adminIds.filter((adminId) => adminId !== userId);
+  }
+  saveState();
+  logAction("project.member.role.updated", { projectId: project.id, userId, role, team });
+  render();
+  return true;
 }
 
 function validProjectMemberIds(project) {
