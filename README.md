@@ -9,11 +9,9 @@ ekrandan yönetebilmesi için geliştirilmiş, SQLite destekli bir web uygulamas
 Uygulama standart Python WSGI arayüzüyle çalışır ve PythonAnywhere üzerinde
 harici backend paketi olmadan yayımlanabilir.
 
-> [!WARNING]
-> Bu depo eğitim ve test amacıyla sekiz açık metin demo şifresi içerir. Demo
-> hesaplarını gerçek kullanıcı verileriyle veya internete açık üretim ortamında
-> kullanmayın. Üretim kullanımı öncesinde şifre hashing ve kalıcı session
-> altyapısına geçilmelidir.
+> [!NOTE]
+> Demo hesaplarının parolaları kaynakta düz metin olarak tutulmaz; PBKDF2-HMAC-SHA256
+> ile saklanan test kimlik bilgileriyle giriş yapılır. Üretimde demo parolalarını değiştirin.
 
 ## Öne Çıkanlar
 
@@ -40,6 +38,7 @@ Project_Management/
 ├── security_tests.py         # 54 güvenlik/regresyon senaryosu
 ├── advanced_tests.py         # 32 ileri seviye iş kuralı ve yük senaryosu
 ├── security_advanced_tests.py # 29 ileri seviye güvenlik senaryosu
+├── endpoint_quality_tests.py   # Ekli 63 maddelik kalite ve güvenlik kontrol listesi
 ├── wsgi.py                   # PythonAnywhere WSGI giriş noktası
 ├── integrations/atolye/      # Atölye kaynak entegrasyonu
 └── proje_yonetimi_ogrenci_belgeleri_word/  # 10 DOCX şablonu
@@ -58,6 +57,7 @@ Gereksinim: Python 3.10 veya üzeri. Önerilen sürüm Python 3.12'dir.
 git clone https://github.com/Alibehram11/Project_Management.git
 cd Project_Management
 python server.py --check
+python endpoint_quality_tests.py
 python server.py
 ```
 

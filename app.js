@@ -178,18 +178,16 @@ const ALLOWED_ROLES = new Set(["member", "lead", "admin"]);
 const ALLOWED_TEAMS = new Set(["Yazılım", "Tasarım", "Mekanik", "Elektronik", "Yönetim"]);
 const ALLOWED_EVENT_TYPES = new Set(["Toplantı", "Teslim", "Test", "Yarışma", "Not"]);
 
-const DEMO_PASSWORD_BY_EMAIL = new Map(
-  [
-    "admin@proje.local",
-    "yazilim@proje.local",
-    "yazilim2@proje.local",
-    "tasarim@proje.local",
-    "mekanik@proje.local",
-    "elektronik@proje.local",
-    "mentor@proje.local",
-    "atolye@proje.local",
-  ].map((email) => [email, "123456"]),
-);
+const DEMO_CREDENTIALS_BY_EMAIL = new Map([
+  ["admin@proje.local", { passwordSalt: "pm-v6-admin-local-salt", passwordHash: "9e0a8cd3a50f77f45f29e0e1199abd3b620bff1376be00eaf826d111cfa9bdca" }],
+  ["yazilim@proje.local", { passwordSalt: "pm-v6-yazilim-local-salt", passwordHash: "6002e2485969c6a524b3740122e184b06eb852802d2a065bd0c440d09f404cc5" }],
+  ["yazilim2@proje.local", { passwordSalt: "pm-v6-yazilim2-local-salt", passwordHash: "030099ef3168bd991f2af6455d782860ee870c9c61320671537b1fc10e8362dc" }],
+  ["tasarim@proje.local", { passwordSalt: "pm-v6-tasarim-local-salt", passwordHash: "acf18a9711dfe1341926b5bab760ca5339ff170924fd4447663d2c3673c811f9" }],
+  ["mekanik@proje.local", { passwordSalt: "pm-v6-mekanik-local-salt", passwordHash: "ee2f922a7740086df8ad6cf3f3312cc011d9de447d58f7c23a3e4cb506298a16" }],
+  ["elektronik@proje.local", { passwordSalt: "pm-v6-elektronik-local-salt", passwordHash: "98445863cc4106925ab906d51860b5f5405f3879cc9651e22b1e3f5ed5a7ec08" }],
+  ["mentor@proje.local", { passwordSalt: "pm-v6-mentor-local-salt", passwordHash: "66d6b31ce933151bcfa7d3f92ed53022607b6e10e96c6152dd9b7a4e236f793b" }],
+  ["atolye@proje.local", { passwordSalt: "pm-v6-atolye-local-salt", passwordHash: "0c30b84311c391a44dfc4932cf49e1388d2cc3bf3834da6d435b38842085e2c6" }],
+]);
 
 const authView = document.querySelector("#authView");
 const appView = document.querySelector("#appView");
@@ -313,21 +311,16 @@ async function hashPassword(password) {
 }
 
 async function verifyPassword(user, password) {
-  if (user?.password && user.password === password) {
-    return true;
-  }
   if (!user?.passwordSalt || !user?.passwordHash) {
     return false;
-  }
-  if (SELF_TEST_MODE && password === SELF_TEST_PASSWORD) {
-    return true;
   }
   const attemptedHash = await derivePasswordHash(password, user.passwordSalt);
   return attemptedHash === user.passwordHash;
 }
 
 function publicUser(user) {
-  return { ...user };
+  const { password, ...publicFields } = user;
+  return publicFields;
 }
 
 function sanitizedStateForStorage(value) {
@@ -343,11 +336,11 @@ function mergeAuthFields(incomingState, localState) {
     ...incomingState,
     users: (incomingState.users || []).map((user) => {
       const localUser = localUsers.get(user.email.toLowerCase());
+      const demoCredentials = DEMO_CREDENTIALS_BY_EMAIL.get(user.email.toLowerCase()) || {};
       return {
         ...user,
-        password: user.password || localUser?.password || DEMO_PASSWORD_BY_EMAIL.get(user.email.toLowerCase()) || "",
-        passwordHash: user.passwordHash || localUser?.passwordHash || "",
-        passwordSalt: user.passwordSalt || localUser?.passwordSalt || "",
+        passwordHash: user.passwordHash || localUser?.passwordHash || demoCredentials.passwordHash || "",
+        passwordSalt: user.passwordSalt || localUser?.passwordSalt || demoCredentials.passwordSalt || "",
       };
     }),
   };
@@ -355,12 +348,10 @@ function mergeAuthFields(incomingState, localState) {
 
 function ensureTestPasswords(users) {
   users.forEach((user) => {
-    if (user.deleted) {
-      return;
-    }
-    const demoPassword = DEMO_PASSWORD_BY_EMAIL.get(user.email.toLowerCase());
-    if (demoPassword && !user.password) {
-      user.password = demoPassword;
+    delete user.password;
+    const credentials = DEMO_CREDENTIALS_BY_EMAIL.get(user.email.toLowerCase());
+    if (credentials && !user.passwordHash) {
+      Object.assign(user, credentials);
     }
   });
 }
@@ -389,7 +380,6 @@ function createSeedData() {
         id: ownerId,
         name: "Ana Admin",
         email: "admin@proje.local",
-        password: "123456",
         passwordSalt: "pm-v6-admin-local-salt",
         passwordHash: "9e0a8cd3a50f77f45f29e0e1199abd3b620bff1376be00eaf826d111cfa9bdca",
       },
@@ -397,49 +387,50 @@ function createSeedData() {
         id: leadId,
         name: "Yazılım Kaptanı",
         email: "yazilim@proje.local",
-        password: "123456",
-        passwordSalt: "pm-v6-lead-local-salt",
-        passwordHash: "fd4ef4cce5064e42a98eb91b375d3c3a338d494cc5df0591d1ab05542962cd83",
+        passwordSalt: "pm-v6-yazilim-local-salt",
+        passwordHash: "6002e2485969c6a524b3740122e184b06eb852802d2a065bd0c440d09f404cc5",
       },
       {
         id: devId,
         name: "Yazılım Üyesi",
         email: "yazilim2@proje.local",
-        password: "123456",
-        passwordSalt: "pm-v6-dev-local-salt",
-        passwordHash: "246c6007971b5f536c00b74006394dbce0e2190d56962eed21dc13a4928219f4",
+        passwordSalt: "pm-v6-yazilim2-local-salt",
+        passwordHash: "030099ef3168bd991f2af6455d782860ee870c9c61320671537b1fc10e8362dc",
       },
       {
         id: designId,
         name: "Tasarım Üyesi",
         email: "tasarim@proje.local",
-        password: "123456",
-        passwordSalt: "pm-v6-design-local-salt",
-        passwordHash: "a7ada7109b75212730964e6cf834865b46ca51c2afba2b4a3516fde4273ff9a7",
+        passwordSalt: "pm-v6-tasarim-local-salt",
+        passwordHash: "acf18a9711dfe1341926b5bab760ca5339ff170924fd4447663d2c3673c811f9",
       },
       {
         id: mechanicId,
         name: "Mekanik Kaptani",
         email: "mekanik@proje.local",
-        password: "123456",
+        passwordSalt: "pm-v6-mekanik-local-salt",
+        passwordHash: "ee2f922a7740086df8ad6cf3f3312cc011d9de447d58f7c23a3e4cb506298a16",
       },
       {
         id: electronicsId,
         name: "Elektronik Uyesi",
         email: "elektronik@proje.local",
-        password: "123456",
+        passwordSalt: "pm-v6-elektronik-local-salt",
+        passwordHash: "98445863cc4106925ab906d51860b5f5405f3879cc9651e22b1e3f5ed5a7ec08",
       },
       {
         id: mentorId,
         name: "Mentor Kullanicisi",
         email: "mentor@proje.local",
-        password: "123456",
+        passwordSalt: "pm-v6-mentor-local-salt",
+        passwordHash: "66d6b31ce933151bcfa7d3f92ed53022607b6e10e96c6152dd9b7a4e236f793b",
       },
       {
         id: workshopId,
         name: "Atolye Sorumlusu",
         email: "atolye@proje.local",
-        password: "123456",
+        passwordSalt: "pm-v6-atolye-local-salt",
+        passwordHash: "0c30b84311c391a44dfc4932cf49e1388d2cc3bf3834da6d435b38842085e2c6",
       },
     ],
     projects: [
@@ -629,7 +620,7 @@ function normalizeState(value) {
     const owner = normalized.users.find((user) => user.id === project.ownerId);
     if (owner?.email === "admin@proje.local") {
       normalized.users.forEach((user) => {
-        if (!DEMO_PASSWORD_BY_EMAIL.has(user.email.toLowerCase())) {
+        if (!DEMO_CREDENTIALS_BY_EMAIL.has(user.email.toLowerCase())) {
           return;
         }
         if (!project.memberIds.includes(user.id)) {
@@ -1039,7 +1030,6 @@ async function registerUser(name, email, password) {
     id: uid(),
     name: cleanName,
     email: normalized,
-    password,
     ...(await hashPassword(password)),
   };
   state.users.push(user);
@@ -3041,7 +3031,6 @@ async function addSystemUser(name, email, password) {
     id: uid(),
     name: cleanName,
     email: normalized,
-    password: cleanPassword,
     ...(await hashPassword(cleanPassword)),
   };
   state.users.push(user);

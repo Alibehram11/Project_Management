@@ -29,11 +29,10 @@ duyurulacaksa zamanlama raporlayan kişiyle koordine edilir.
 
 ## Üretim Uyarısı
 
-Depodaki demo hesapları açık metin `123456` şifresini kullanır. Bu tercih test
-senaryoları içindir ve üretim güvenliği sağlamaz. İnternete açık gerçek kullanım
-öncesinde en az aşağıdaki değişiklikler yapılmalıdır:
+Demo hesapları `123456` parolasını kullanır ancak parola değeri kaynakta veya
+SQLite state içinde tutulmaz; PBKDF2-HMAC-SHA256 hash ve kullanıcıya özel salt
+kullanılır. Üretimde demo parolalarını değiştirin. Ayrıca:
 
-- Argon2id, scrypt veya bcrypt ile şifre hashing
 - Kalıcı ve iptal edilebilir session deposu
 - Güçlü, ortam değişkeni tabanlı secret yönetimi
 - TLS terminasyonu ve güvenilir reverse proxy yapılandırması

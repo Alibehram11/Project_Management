@@ -52,6 +52,7 @@ MAX_SANITIZE_DEPTH = 8
 MAX_SANITIZE_NODES = 250_000
 MAX_SANITIZE_STRING = 20_000
 SESSION_TTL_SECONDS = 8 * 60 * 60
+PASSWORD_ITERATIONS = 120_000
 RATE_WINDOW_SECONDS = 60
 RATE_LIMIT_DEFAULT = 90
 RATE_LIMIT_LOGIN = 12
@@ -97,14 +98,14 @@ CONFIGURED_ALLOWED_HOSTS = {
 ALLOWED_HOSTS = DEFAULT_ALLOWED_HOSTS | CONFIGURED_ALLOWED_HOSTS
 
 DEMO_USERS = [
-    {"id": "demo-admin", "name": "Ana Admin", "email": "admin@proje.local", "password": "123456", "role": "admin"},
-    {"id": "demo-yazilim", "name": "Yazilim Kaptani", "email": "yazilim@proje.local", "password": "123456", "role": "member"},
-    {"id": "demo-yazilim2", "name": "Yazilim Uyesi", "email": "yazilim2@proje.local", "password": "123456", "role": "member"},
-    {"id": "demo-tasarim", "name": "Tasarim Uyesi", "email": "tasarim@proje.local", "password": "123456", "role": "member"},
-    {"id": "demo-mekanik", "name": "Mekanik Kaptani", "email": "mekanik@proje.local", "password": "123456", "role": "member"},
-    {"id": "demo-elektronik", "name": "Elektronik Uyesi", "email": "elektronik@proje.local", "password": "123456", "role": "member"},
-    {"id": "demo-mentor", "name": "Mentor Kullanicisi", "email": "mentor@proje.local", "password": "123456", "role": "admin"},
-    {"id": "demo-atolye", "name": "Atolye Sorumlusu", "email": "atolye@proje.local", "password": "123456", "role": "admin"},
+    {"id": "demo-admin", "name": "Ana Admin", "email": "admin@proje.local", "passwordSalt": "pm-v6-admin-local-salt", "passwordHash": "9e0a8cd3a50f77f45f29e0e1199abd3b620bff1376be00eaf826d111cfa9bdca", "role": "admin"},
+    {"id": "demo-yazilim", "name": "Yazilim Kaptani", "email": "yazilim@proje.local", "passwordSalt": "pm-v6-yazilim-local-salt", "passwordHash": "6002e2485969c6a524b3740122e184b06eb852802d2a065bd0c440d09f404cc5", "role": "member"},
+    {"id": "demo-yazilim2", "name": "Yazilim Uyesi", "email": "yazilim2@proje.local", "passwordSalt": "pm-v6-yazilim2-local-salt", "passwordHash": "030099ef3168bd991f2af6455d782860ee870c9c61320671537b1fc10e8362dc", "role": "member"},
+    {"id": "demo-tasarim", "name": "Tasarim Uyesi", "email": "tasarim@proje.local", "passwordSalt": "pm-v6-tasarim-local-salt", "passwordHash": "acf18a9711dfe1341926b5bab760ca5339ff170924fd4447663d2c3673c811f9", "role": "member"},
+    {"id": "demo-mekanik", "name": "Mekanik Kaptani", "email": "mekanik@proje.local", "passwordSalt": "pm-v6-mekanik-local-salt", "passwordHash": "ee2f922a7740086df8ad6cf3f3312cc011d9de447d58f7c23a3e4cb506298a16", "role": "member"},
+    {"id": "demo-elektronik", "name": "Elektronik Uyesi", "email": "elektronik@proje.local", "passwordSalt": "pm-v6-elektronik-local-salt", "passwordHash": "98445863cc4106925ab906d51860b5f5405f3879cc9651e22b1e3f5ed5a7ec08", "role": "member"},
+    {"id": "demo-mentor", "name": "Mentor Kullanicisi", "email": "mentor@proje.local", "passwordSalt": "pm-v6-mentor-local-salt", "passwordHash": "66d6b31ce933151bcfa7d3f92ed53022607b6e10e96c6152dd9b7a4e236f793b", "role": "admin"},
+    {"id": "demo-atolye", "name": "Atolye Sorumlusu", "email": "atolye@proje.local", "passwordSalt": "pm-v6-atolye-local-salt", "passwordHash": "0c30b84311c391a44dfc4932cf49e1388d2cc3bf3834da6d435b38842085e2c6", "role": "admin"},
 ]
 
 KNOWN_TEMPLATES = {
@@ -179,6 +180,27 @@ def login_account_rate_limit(email: object) -> bool:
     return rate_limit_key("login-account", account_key, RATE_LIMIT_LOGIN_ACCOUNT)
 
 
+def password_record(password: object, salt: str | None = None) -> dict[str, str]:
+    password_text = str(password or "")
+    password_salt = salt or secrets.token_hex(16)
+    digest = hashlib.pbkdf2_hmac(
+        "sha256",
+        password_text.encode("utf-8"),
+        password_salt.encode("utf-8"),
+        PASSWORD_ITERATIONS,
+    ).hex()
+    return {"passwordHash": digest, "passwordSalt": password_salt}
+
+
+def password_matches(user: dict, password: object) -> bool:
+    stored_hash = str(user.get("passwordHash") or "")
+    stored_salt = str(user.get("passwordSalt") or "")
+    if not stored_hash or not stored_salt:
+        return False
+    attempted = password_record(password, stored_salt)["passwordHash"]
+    return secrets.compare_digest(stored_hash, attempted)
+
+
 def load_app_state() -> dict | None:
     with connect_db() as conn:
         row = conn.execute("SELECT payload_json FROM app_state WHERE key = ?", (STATE_KEY,)).fetchone()
@@ -230,15 +252,11 @@ def find_auth_user(email: str, password: str) -> dict | None:
         users.extend(DEMO_USERS)
 
     supplied_email = hashlib.sha256(normalized_email.encode("utf-8")).digest()
-    supplied_password = hashlib.sha256(str(password or "").encode("utf-8")).digest()
     matched_user = None
     for user in users:
         candidate_email = str(user.get("email", "")).strip().casefold()
         candidate_email_digest = hashlib.sha256(candidate_email.encode("utf-8")).digest()
-        candidate_password = hashlib.sha256(str(user.get("password") or "").encode("utf-8")).digest()
-        credentials_match = secrets.compare_digest(candidate_email_digest, supplied_email) and secrets.compare_digest(
-            candidate_password, supplied_password
-        )
+        credentials_match = secrets.compare_digest(candidate_email_digest, supplied_email) and password_matches(user, password)
         if credentials_match and not user.get("deleted"):
             matched_user = user
 
@@ -305,9 +323,8 @@ def consume_password_reset(token: str, new_password: str) -> bool:
             )
             if not user:
                 return False
-            user["password"] = safe_text(new_password, 500)
-            user.pop("passwordHash", None)
-            user.pop("passwordSalt", None)
+            user.update(password_record(new_password))
+            user.pop("password", None)
             conn.execute(
                 "UPDATE app_state SET payload_json = ?, revision = ?, updated_at = ?, updated_by = ?, reason = ? WHERE key = ?",
                 (json.dumps(state, ensure_ascii=False), revision + 1, now_iso(), record["email"], "password-reset", STATE_KEY),
@@ -511,6 +528,7 @@ def init_db() -> None:
 
 
 def db_log(actor: str, action: str, detail: object | None = None) -> None:
+    safe_detail = redact_sensitive_fields(sanitize_value(detail or {}, depth=0))
     with connect_db() as conn:
         conn.execute(
             "INSERT INTO logs (ts, actor, action, detail_json) VALUES (?, ?, ?, ?)",
@@ -518,7 +536,7 @@ def db_log(actor: str, action: str, detail: object | None = None) -> None:
                 now_iso(),
                 safe_text(actor or "anonim", 120),
                 safe_text(action or "unknown", 120),
-                json.dumps(sanitize_value(detail or {}, depth=0), ensure_ascii=False),
+                json.dumps(safe_detail, ensure_ascii=False),
             ),
         )
         conn.execute(
@@ -898,11 +916,16 @@ def sanitize_state_payload(payload: object) -> object:
         return {}
     users = clean.get("users")
     if isinstance(users, list):
-        clean["users"] = [
-            dict(user)
-            for user in users
-            if isinstance(user, dict)
-        ]
+        normalized_users = []
+        for user in users:
+            if not isinstance(user, dict):
+                continue
+            normalized = dict(user)
+            if not normalized.get("passwordHash") and normalized.get("password"):
+                normalized.update(password_record(normalized["password"]))
+            normalized.pop("password", None)
+            normalized_users.append(normalized)
+        clean["users"] = normalized_users
     return clean
 
 
@@ -1173,6 +1196,8 @@ def application(environ, start_response):
                 with connect_db() as conn:
                     rows = conn.execute("SELECT id, ts, actor FROM snapshots ORDER BY id DESC LIMIT 50").fetchall()
                 return wsgi_json(environ, start_response, {"ok": True, "snapshots": [{"id": row[0], "ts": row[1], "actor": row[2]} for row in rows]})
+            if path.startswith("/api/"):
+                return wsgi_json(environ, start_response, {"ok": False, "error": "not-found"}, 404)
             return wsgi_static(environ, start_response, path)
         if method == "POST":
             client_ip = client_ip_from_headers(environ)
@@ -1182,9 +1207,11 @@ def application(environ, start_response):
                 return wsgi_json(environ, start_response, {"ok": False, "error": "origin-blocked"}, 403)
             payload = wsgi_read_json(environ)
             if path == "/api/auth/login":
+                if not isinstance(payload.get("email"), str) or not isinstance(payload.get("password"), str) or not payload.get("email") or not payload.get("password"):
+                    return wsgi_json(environ, start_response, {"ok": False, "error": "bad-request"}, 400)
                 if not login_account_rate_limit(payload.get("email", "")):
                     return wsgi_json(environ, start_response, {"ok": False, "error": "rate-limit"}, 429)
-                user = find_auth_user(str(payload.get("email", "")), str(payload.get("password", "")))
+                user = find_auth_user(payload["email"], payload["password"])
                 if not user:
                     return wsgi_json(environ, start_response, {"ok": False, "error": "auth-required"}, 401)
                 result = create_api_session(user)
@@ -1233,7 +1260,7 @@ def application(environ, start_response):
                     return wsgi_json(environ, start_response, {"ok": False, "error": "unknown-template"}, 400)
                 try:
                     data = base64.b64decode(payload.get("dataBase64", ""), validate=True)
-                except (binascii.Error, ValueError):
+                except (binascii.Error, TypeError, ValueError):
                     return wsgi_json(environ, start_response, {"ok": False, "error": "invalid-docx"}, 400)
                 valid, validation_error = validate_docx_bytes(data)
                 if not valid:

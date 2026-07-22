@@ -34,6 +34,7 @@ jobs:
         run: >-
           python -m py_compile
           server.py advanced_rules.py security_tests.py advanced_tests.py
+          endpoint_quality_tests.py
           security_advanced_tests.py wsgi.py
           integrations/atolye/app.py integrations/atolye/models.py
 
@@ -45,6 +46,9 @@ jobs:
 
       - name: Run advanced security suite
         run: python security_advanced_tests.py
+
+      - name: Run endpoint quality checklist
+        run: python endpoint_quality_tests.py
 
       - name: Validate runtime and Word templates
         run: python server.py --check
