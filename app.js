@@ -723,14 +723,15 @@ async function apiJson(path, options = {}) {
   try {
     const method = (options.method || "GET").toUpperCase();
     const isLogin = path === "/api/auth/login";
+    const { headers: customHeaders = {}, ...requestOptions } = options;
     const response = await fetch(path, {
+      ...requestOptions,
       headers: {
         "Content-Type": "application/json",
         ...(apiAuthToken && !isLogin ? { Authorization: `Bearer ${apiAuthToken}` } : {}),
         ...(apiCsrfToken && method !== "GET" && !isLogin ? { "X-CSRF-Token": apiCsrfToken } : {}),
-        ...(options.headers || {}),
+        ...customHeaders,
       },
-      ...options,
     });
     const responsePayload = response.status === 204 ? {} : await response.json();
     if (!response.ok) {
@@ -3088,7 +3089,6 @@ function deleteSystemUser(userId) {
   if (deletedUser) {
     deletedUser.name = "Silinmiş kullanıcı";
     deletedUser.deleted = true;
-    deletedUser.password = "";
     delete deletedUser.passwordHash;
     delete deletedUser.passwordSalt;
   }

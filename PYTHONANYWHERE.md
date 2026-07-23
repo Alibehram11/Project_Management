@@ -89,5 +89,5 @@ https://KULLANICI_ADIN.pythonanywhere.com/api/health
   test etmek icindir.
 - Veritabani dosyasi `app_data.sqlite3` proje klasorunde olusur.
 - Yuklenen Word sablonlari `uploaded_templates/` klasorune yazilir.
-- Test surumunde sifreler acik metin olarak tutulur; gercek yayinda bunu tekrar
-  hash'li hale getirmek gerekir.
+- Demo hesaplari PBKDF2-HMAC-SHA256 hash ve kullaniciya ozel salt ile saklanir;
+  yine de PythonAnywhere'de yayina almadan once demo parolalarini degistirin.

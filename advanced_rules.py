@@ -476,7 +476,6 @@ def _preserve_deleted_users(current: dict, incoming: dict) -> None:
             "id": user_id,
             "name": "Silinmiş kullanıcı",
             "email": str(old_users[user_id].get("email") or f"deleted+{user_id}@local.invalid"),
-            "password": "",
             "deleted": True,
         }
         for project in incoming.get("projects", []):

@@ -28,8 +28,10 @@ PR açmadan önce:
 ```powershell
 python security_tests.py
 python advanced_tests.py
+python security_advanced_tests.py
+python endpoint_quality_tests.py
 python server.py --check
-python -m py_compile server.py advanced_rules.py security_tests.py advanced_tests.py wsgi.py
+python -m py_compile server.py advanced_rules.py security_tests.py advanced_tests.py security_advanced_tests.py endpoint_quality_tests.py wsgi.py
 ```
 
 Yeni hata düzeltmeleri uygun bir regresyon testi içermelidir. Testler birbirinin

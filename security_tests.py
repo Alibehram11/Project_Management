@@ -320,6 +320,18 @@ def run() -> None:
 
     add("54 frontend exposes project role assignment controls", frontend_role_controls_exist)
 
+    def frontend_api_merges_custom_headers():
+        text = Path("app.js").read_text(encoding="utf-8")
+        required = (
+            "const { headers: customHeaders = {}, ...requestOptions } = options;",
+            "...requestOptions,",
+            "...customHeaders,",
+        )
+        if any(fragment not in text for fragment in required):
+            raise AssertionError("apiJson can overwrite auth or csrf headers")
+
+    add("55 frontend API options preserve auth and csrf headers", frontend_api_merges_custom_headers)
+
     passed = []
     configure_test_backend(Path(".security_test_runtime"))
     for name, fn in tests:

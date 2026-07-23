@@ -35,7 +35,7 @@ Project_Management/
 ├── app.js                    # Tarayıcı uygulaması ve kullanıcı iş akışları
 ├── index.html
 ├── styles.css
-├── security_tests.py         # 54 güvenlik/regresyon senaryosu
+├── security_tests.py         # 55 güvenlik/regresyon senaryosu
 ├── advanced_tests.py         # 32 ileri seviye iş kuralı ve yük senaryosu
 ├── security_advanced_tests.py # 29 ileri seviye güvenlik senaryosu
 ├── endpoint_quality_tests.py   # Ekli 63 maddelik kalite ve güvenlik kontrol listesi
@@ -91,15 +91,17 @@ Tam doğrulama:
 python security_tests.py
 python advanced_tests.py
 python security_advanced_tests.py
+python endpoint_quality_tests.py
 python server.py --check
-python -m py_compile server.py advanced_rules.py security_tests.py advanced_tests.py security_advanced_tests.py wsgi.py
+python -m py_compile server.py advanced_rules.py security_tests.py advanced_tests.py security_advanced_tests.py endpoint_quality_tests.py wsgi.py
 ```
 
 Beklenen sonuç:
 
-- Güvenlik/regresyon testleri: `54/54 PASS`
+- Güvenlik/regresyon testleri: `55/55 PASS`
 - İleri seviye senaryolar: `32/32 PASS`
 - İleri seviye güvenlik senaryoları: `29/29 PASS`
+- Ekli kalite kontrol listesi: `45 PASS`, `0 FAIL`, `18 NOT_APPLICABLE`
 - Word şablon kontrolü: `10/10`
 
 Tarayıcı iş akışlarını kontrol etmek için uygulamayı
