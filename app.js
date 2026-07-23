@@ -178,18 +178,16 @@ const ALLOWED_ROLES = new Set(["member", "lead", "admin"]);
 const ALLOWED_TEAMS = new Set(["Yazılım", "Tasarım", "Mekanik", "Elektronik", "Yönetim"]);
 const ALLOWED_EVENT_TYPES = new Set(["Toplantı", "Teslim", "Test", "Yarışma", "Not"]);
 
-const DEMO_PASSWORD_BY_EMAIL = new Map(
-  [
-    "admin@proje.local",
-    "yazilim@proje.local",
-    "yazilim2@proje.local",
-    "tasarim@proje.local",
-    "mekanik@proje.local",
-    "elektronik@proje.local",
-    "mentor@proje.local",
-    "atolye@proje.local",
-  ].map((email) => [email, "123456"]),
-);
+const DEMO_CREDENTIALS_BY_EMAIL = new Map([
+  ["admin@proje.local", { passwordSalt: "pm-v6-admin-local-salt", passwordHash: "9e0a8cd3a50f77f45f29e0e1199abd3b620bff1376be00eaf826d111cfa9bdca" }],
+  ["yazilim@proje.local", { passwordSalt: "pm-v6-yazilim-local-salt", passwordHash: "6002e2485969c6a524b3740122e184b06eb852802d2a065bd0c440d09f404cc5" }],
+  ["yazilim2@proje.local", { passwordSalt: "pm-v6-yazilim2-local-salt", passwordHash: "030099ef3168bd991f2af6455d782860ee870c9c61320671537b1fc10e8362dc" }],
+  ["tasarim@proje.local", { passwordSalt: "pm-v6-tasarim-local-salt", passwordHash: "acf18a9711dfe1341926b5bab760ca5339ff170924fd4447663d2c3673c811f9" }],
+  ["mekanik@proje.local", { passwordSalt: "pm-v6-mekanik-local-salt", passwordHash: "ee2f922a7740086df8ad6cf3f3312cc011d9de447d58f7c23a3e4cb506298a16" }],
+  ["elektronik@proje.local", { passwordSalt: "pm-v6-elektronik-local-salt", passwordHash: "98445863cc4106925ab906d51860b5f5405f3879cc9651e22b1e3f5ed5a7ec08" }],
+  ["mentor@proje.local", { passwordSalt: "pm-v6-mentor-local-salt", passwordHash: "66d6b31ce933151bcfa7d3f92ed53022607b6e10e96c6152dd9b7a4e236f793b" }],
+  ["atolye@proje.local", { passwordSalt: "pm-v6-atolye-local-salt", passwordHash: "0c30b84311c391a44dfc4932cf49e1388d2cc3bf3834da6d435b38842085e2c6" }],
+]);
 
 const authView = document.querySelector("#authView");
 const appView = document.querySelector("#appView");
@@ -261,6 +259,7 @@ let latestLogs = [];
 let csrfToken = "";
 let apiAuthToken = session.apiToken || "";
 let apiCsrfToken = session.apiCsrfToken || "";
+let backendRevision = Number(session.backendRevision || 0);
 
 function uid() {
   if (window.crypto?.randomUUID) {
@@ -312,21 +311,16 @@ async function hashPassword(password) {
 }
 
 async function verifyPassword(user, password) {
-  if (user?.password && user.password === password) {
-    return true;
-  }
   if (!user?.passwordSalt || !user?.passwordHash) {
     return false;
-  }
-  if (SELF_TEST_MODE && password === SELF_TEST_PASSWORD) {
-    return true;
   }
   const attemptedHash = await derivePasswordHash(password, user.passwordSalt);
   return attemptedHash === user.passwordHash;
 }
 
 function publicUser(user) {
-  return { ...user };
+  const { password, ...publicFields } = user;
+  return publicFields;
 }
 
 function sanitizedStateForStorage(value) {
@@ -342,11 +336,11 @@ function mergeAuthFields(incomingState, localState) {
     ...incomingState,
     users: (incomingState.users || []).map((user) => {
       const localUser = localUsers.get(user.email.toLowerCase());
+      const demoCredentials = DEMO_CREDENTIALS_BY_EMAIL.get(user.email.toLowerCase()) || {};
       return {
         ...user,
-        password: user.password || localUser?.password || DEMO_PASSWORD_BY_EMAIL.get(user.email.toLowerCase()) || "",
-        passwordHash: user.passwordHash || localUser?.passwordHash || "",
-        passwordSalt: user.passwordSalt || localUser?.passwordSalt || "",
+        passwordHash: user.passwordHash || localUser?.passwordHash || demoCredentials.passwordHash || "",
+        passwordSalt: user.passwordSalt || localUser?.passwordSalt || demoCredentials.passwordSalt || "",
       };
     }),
   };
@@ -354,9 +348,10 @@ function mergeAuthFields(incomingState, localState) {
 
 function ensureTestPasswords(users) {
   users.forEach((user) => {
-    const demoPassword = DEMO_PASSWORD_BY_EMAIL.get(user.email.toLowerCase());
-    if (demoPassword && !user.password) {
-      user.password = demoPassword;
+    delete user.password;
+    const credentials = DEMO_CREDENTIALS_BY_EMAIL.get(user.email.toLowerCase());
+    if (credentials && !user.passwordHash) {
+      Object.assign(user, credentials);
     }
   });
 }
@@ -385,7 +380,6 @@ function createSeedData() {
         id: ownerId,
         name: "Ana Admin",
         email: "admin@proje.local",
-        password: "123456",
         passwordSalt: "pm-v6-admin-local-salt",
         passwordHash: "9e0a8cd3a50f77f45f29e0e1199abd3b620bff1376be00eaf826d111cfa9bdca",
       },
@@ -393,49 +387,50 @@ function createSeedData() {
         id: leadId,
         name: "Yazılım Kaptanı",
         email: "yazilim@proje.local",
-        password: "123456",
-        passwordSalt: "pm-v6-lead-local-salt",
-        passwordHash: "fd4ef4cce5064e42a98eb91b375d3c3a338d494cc5df0591d1ab05542962cd83",
+        passwordSalt: "pm-v6-yazilim-local-salt",
+        passwordHash: "6002e2485969c6a524b3740122e184b06eb852802d2a065bd0c440d09f404cc5",
       },
       {
         id: devId,
         name: "Yazılım Üyesi",
         email: "yazilim2@proje.local",
-        password: "123456",
-        passwordSalt: "pm-v6-dev-local-salt",
-        passwordHash: "246c6007971b5f536c00b74006394dbce0e2190d56962eed21dc13a4928219f4",
+        passwordSalt: "pm-v6-yazilim2-local-salt",
+        passwordHash: "030099ef3168bd991f2af6455d782860ee870c9c61320671537b1fc10e8362dc",
       },
       {
         id: designId,
         name: "Tasarım Üyesi",
         email: "tasarim@proje.local",
-        password: "123456",
-        passwordSalt: "pm-v6-design-local-salt",
-        passwordHash: "a7ada7109b75212730964e6cf834865b46ca51c2afba2b4a3516fde4273ff9a7",
+        passwordSalt: "pm-v6-tasarim-local-salt",
+        passwordHash: "acf18a9711dfe1341926b5bab760ca5339ff170924fd4447663d2c3673c811f9",
       },
       {
         id: mechanicId,
         name: "Mekanik Kaptani",
         email: "mekanik@proje.local",
-        password: "123456",
+        passwordSalt: "pm-v6-mekanik-local-salt",
+        passwordHash: "ee2f922a7740086df8ad6cf3f3312cc011d9de447d58f7c23a3e4cb506298a16",
       },
       {
         id: electronicsId,
         name: "Elektronik Uyesi",
         email: "elektronik@proje.local",
-        password: "123456",
+        passwordSalt: "pm-v6-elektronik-local-salt",
+        passwordHash: "98445863cc4106925ab906d51860b5f5405f3879cc9651e22b1e3f5ed5a7ec08",
       },
       {
         id: mentorId,
         name: "Mentor Kullanicisi",
         email: "mentor@proje.local",
-        password: "123456",
+        passwordSalt: "pm-v6-mentor-local-salt",
+        passwordHash: "66d6b31ce933151bcfa7d3f92ed53022607b6e10e96c6152dd9b7a4e236f793b",
       },
       {
         id: workshopId,
         name: "Atolye Sorumlusu",
         email: "atolye@proje.local",
-        password: "123456",
+        passwordSalt: "pm-v6-atolye-local-salt",
+        passwordHash: "0c30b84311c391a44dfc4932cf49e1388d2cc3bf3834da6d435b38842085e2c6",
       },
     ],
     projects: [
@@ -625,7 +620,7 @@ function normalizeState(value) {
     const owner = normalized.users.find((user) => user.id === project.ownerId);
     if (owner?.email === "admin@proje.local") {
       normalized.users.forEach((user) => {
-        if (!DEMO_PASSWORD_BY_EMAIL.has(user.email.toLowerCase())) {
+        if (!DEMO_CREDENTIALS_BY_EMAIL.has(user.email.toLowerCase())) {
           return;
         }
         if (!project.memberIds.includes(user.id)) {
@@ -728,21 +723,25 @@ async function apiJson(path, options = {}) {
   try {
     const method = (options.method || "GET").toUpperCase();
     const isLogin = path === "/api/auth/login";
+    const { headers: customHeaders = {}, ...requestOptions } = options;
     const response = await fetch(path, {
+      ...requestOptions,
       headers: {
         "Content-Type": "application/json",
         ...(apiAuthToken && !isLogin ? { Authorization: `Bearer ${apiAuthToken}` } : {}),
         ...(apiCsrfToken && method !== "GET" && !isLogin ? { "X-CSRF-Token": apiCsrfToken } : {}),
-        ...(options.headers || {}),
+        ...customHeaders,
       },
-      ...options,
     });
+    const responsePayload = response.status === 204 ? {} : await response.json();
     if (!response.ok) {
-      throw new Error(`HTTP ${response.status}`);
+      backendOnline = true;
+      updateBackendStatus(`Backend isteği reddetti: ${responsePayload.error || response.status}`);
+      return { ...responsePayload, httpStatus: response.status };
     }
     backendOnline = true;
     updateBackendStatus();
-    return response.status === 204 ? {} : response.json();
+    return responsePayload;
   } catch (error) {
     backendOnline = false;
     updateBackendStatus("Backend kapalı: python server.py ile açınca kayıt, log ve Word indirme aktif olur.");
@@ -769,7 +768,7 @@ async function apiLogin(email, password) {
 }
 
 function queueStateSync(reason) {
-  if (!canUseBackend() || SELF_TEST_MODE || !apiAuthToken || !isProjectManager()) {
+  if (!canUseBackend() || SELF_TEST_MODE || !apiAuthToken) {
     return false;
   }
   clearTimeout(stateSyncTimer);
@@ -777,14 +776,24 @@ function queueStateSync(reason) {
 }
 
 async function syncStateToBackend(reason = "state-sync") {
-  await apiJson("/api/state", {
+  const result = await apiJson("/api/state", {
     method: "POST",
     body: JSON.stringify({
       reason,
       actor: currentUser()?.email || "anonim",
+      revision: backendRevision,
       payload: sanitizedStateForStorage(state),
     }),
   });
+  if (result?.ok) {
+    backendRevision = Number(result.revision || backendRevision + 1);
+    session.backendRevision = backendRevision;
+    saveSession();
+  } else if (result?.error === "revision-conflict") {
+    setMaintenanceMessage("Başka bir kullanıcı daha yeni değişiklik kaydetti. Veriler yenileniyor.", "error");
+    await loadBackendStateAfterLogin();
+  }
+  return result;
 }
 
 async function logAction(action, detail = {}) {
@@ -818,6 +827,8 @@ async function loadBackendStateAfterLogin() {
   }
   const saved = await apiJson("/api/state");
   if (saved?.payload) {
+    backendRevision = Number(saved.revision || 0);
+    session.backendRevision = backendRevision;
     const currentEmail = currentUser()?.email || "";
     state = normalizeState(mergeAuthFields(saved.payload, state));
     const backendUser = state.users.find((user) => user.email.toLowerCase() === currentEmail.toLowerCase());
@@ -825,6 +836,7 @@ async function loadBackendStateAfterLogin() {
       session.userId = backendUser.id;
       saveSession();
     }
+    saveSession();
     localStorage.setItem(STORAGE_KEY, JSON.stringify(sanitizedStateForStorage(state)));
     render();
   } else if (isProjectManager()) {
@@ -899,21 +911,33 @@ function roleFor(project, userId) {
 }
 
 function canManageProject() {
+  if (isSystemAdmin()) {
+    return Boolean(currentProject());
+  }
   const role = roleFor(currentProject(), session.userId);
   return role === "owner" || role === "admin";
 }
 
 function canAssignTasks() {
+  if (isSystemAdmin()) {
+    return Boolean(currentProject());
+  }
   const role = roleFor(currentProject(), session.userId);
   return role === "owner" || role === "admin" || role === "lead";
 }
 
 function isProjectManager() {
+  if (isSystemAdmin()) {
+    return Boolean(currentProject());
+  }
   const role = roleFor(currentProject(), session.userId);
   return role === "owner" || role === "admin";
 }
 
 function canEditTemplates() {
+  if (isSystemAdmin()) {
+    return Boolean(currentProject());
+  }
   return roleFor(currentProject(), session.userId) === "owner";
 }
 
@@ -1007,7 +1031,6 @@ async function registerUser(name, email, password) {
     id: uid(),
     name: cleanName,
     email: normalized,
-    password,
     ...(await hashPassword(password)),
   };
   state.users.push(user);
@@ -1021,9 +1044,17 @@ async function registerUser(name, email, password) {
 }
 
 function logout() {
-  logAction("auth.logout", { actor: currentUser()?.email || "anonim" });
+  const actor = currentUser()?.email || "anonim";
+  logAction("auth.logout", { actor });
+  if (apiAuthToken && apiCsrfToken) {
+    void apiJson("/api/auth/logout", {
+      method: "POST",
+      body: JSON.stringify({}),
+    });
+  }
   apiAuthToken = "";
   apiCsrfToken = "";
+  backendRevision = 0;
   csrfToken = "";
   session = { userId: null, projectId: null, view: "admin", documentId: "fr01" };
   saveSession();
@@ -1260,15 +1291,30 @@ function renderAdmin() {
 function renderAdminUsers() {
   const list = document.querySelector("#adminUserList");
   const label = document.querySelector("#adminUserCountLabel");
+  const userForm = document.querySelector("#adminUserForm");
+  const userHint = document.querySelector("#adminUserPermissionHint");
   if (!list || !label) {
     return;
+  }
+
+  const activeProject = currentProject();
+  const canEditRoles = Boolean(activeProject && (isSystemAdmin() || canManageProject()));
+  if (userForm) {
+    userForm.classList.toggle("hidden", !isSystemAdmin());
+  }
+  if (userHint) {
+    userHint.textContent = isSystemAdmin()
+      ? "Ana admin, aktif projedeki üye rollerini aşağıdan değiştirebilir."
+      : "Yeni hesapları ana admin oluşturur; kayıtlı kullanıcıları aktif projeye Üye ekle düğmesiyle davet edebilirsiniz.";
   }
 
   label.textContent = `${state.users.length} kullanıcı`;
   list.innerHTML = "";
   state.users.forEach((user) => {
-    const activeProject = currentProject();
     const isMember = activeProject?.memberIds.includes(user.id);
+    const projectRole = isMember ? roleFor(activeProject, user.id) : "none";
+    const profile = isMember ? profileFor(activeProject, user.id) : null;
+    const isOwner = user.id === activeProject?.ownerId;
     const item = document.createElement("article");
     item.className = "admin-list-item";
     item.innerHTML = `
@@ -1276,13 +1322,40 @@ function renderAdminUsers() {
         <strong></strong>
         <span></span>
       </div>
+      <div class="permission-controls">
+        <select data-member-role aria-label="Proje rolü">
+          <option value="member">Üye</option>
+          <option value="lead">Ekip kaptanı</option>
+          <option value="admin">Admin</option>
+        </select>
+        <select data-member-team aria-label="Proje ekibi">
+          <option value="Yazılım">Yazılım</option>
+          <option value="Tasarım">Tasarım</option>
+          <option value="Mekanik">Mekanik</option>
+          <option value="Elektronik">Elektronik</option>
+          <option value="Yönetim">Yönetim</option>
+        </select>
+        <button class="secondary-action small" data-save-role type="button">Yetkiyi kaydet</button>
+      </div>
       <div class="row-actions">
         <button class="secondary-action small" data-remove-project type="button">Projeden çıkar</button>
         <button class="secondary-action small danger-action" data-delete-user type="button">Sistemden sil</button>
       </div>
     `;
     item.querySelector("strong").textContent = user.name;
-    item.querySelector("span").textContent = `${user.email} · ${isMember ? "bu projede" : "projede değil"}`;
+    item.querySelector("span").textContent = `${user.email} · ${isMember ? roleLabel(projectRole) : "projede değil"}`;
+
+    const roleSelect = item.querySelector("[data-member-role]");
+    const teamSelect = item.querySelector("[data-member-team]");
+    const saveRoleButton = item.querySelector("[data-save-role]");
+    roleSelect.value = projectRole === "owner" ? "admin" : projectRole;
+    teamSelect.value = profile?.team || "Yönetim";
+    roleSelect.disabled = !canEditRoles || !isMember || isOwner;
+    teamSelect.disabled = !canEditRoles || !isMember;
+    saveRoleButton.disabled = !canEditRoles || !isMember || isOwner;
+    saveRoleButton.addEventListener("click", () => {
+      updateProjectMemberRole(user.id, roleSelect.value, teamSelect.value);
+    });
 
     const removeProjectButton = item.querySelector("[data-remove-project]");
     removeProjectButton.disabled = !isMember || user.id === activeProject?.ownerId || user.id === session.userId;
@@ -1465,7 +1538,7 @@ function renderDashboard() {
   const review = tasks.filter((task) => task.status === "review");
   const changes = tasks.filter((task) => task.status === "changes");
   const ongoing = tasks.filter((task) => task.status !== "approved");
-  const productivity = tasks.length === 0 ? 100 : Math.round((approved.length / tasks.length) * 100);
+  const productivity = tasks.length === 0 ? 0 : Math.round((approved.length / tasks.length) * 100);
 
   document.querySelector("#openTasks").textContent = ongoing.length;
   document.querySelector("#reviewTasks").textContent = review.length;
@@ -1826,7 +1899,8 @@ function addTaskComment(taskId, text) {
   const cleanText = text.trim();
   if (
     !taskBelongsToCurrentProject(task) ||
-    !cleanText ||
+    !cleanText || cleanText.length > 20000 ||
+    ["archived", "completed"].includes(currentProject()?.status) ||
     !validProjectMemberIds(currentProject()).includes(session.userId)
   ) {
     return false;
@@ -1924,7 +1998,7 @@ function createSubmitForm(task) {
 
 function submitTask(taskId, submission) {
   const task = state.tasks.find((item) => item.id === taskId);
-  if (!taskBelongsToCurrentProject(task) || task.assigneeId !== session.userId || task.status === "approved") {
+  if (!taskBelongsToCurrentProject(task) || task.assigneeId !== session.userId || task.status === "approved" || ["archived", "completed"].includes(currentProject()?.status)) {
     return false;
   }
 
@@ -1949,7 +2023,7 @@ function submitTask(taskId, submission) {
 
 function updateTaskStatus(taskId, status) {
   const task = state.tasks.find((item) => item.id === taskId);
-  if (!taskBelongsToCurrentProject(task) || !canManageProject() || !["approved", "changes"].includes(status)) {
+  if (!taskBelongsToCurrentProject(task) || !canManageProject() || ["archived", "completed"].includes(currentProject()?.status) || !["approved", "changes"].includes(status)) {
     return false;
   }
   task.status = status;
@@ -2794,13 +2868,13 @@ function renderTemplateQuestions() {
 
 function createTask(formData) {
   const project = currentProject();
-  if (!project || !canAssignTasks() || !formData.assigneeId) {
+  if (!project || !canAssignTasks() || !formData.assigneeId || ["archived", "completed"].includes(project.status)) {
     return false;
   }
 
   const title = formData.title.trim();
   const description = formData.description.trim();
-  if (!title || !description || !project.memberIds.includes(formData.assigneeId)) {
+  if (!title || title.length > 300 || !description || description.length > 20000 || !project.memberIds.includes(formData.assigneeId)) {
     return false;
   }
   const priority = ALLOWED_PRIORITIES.has(formData.priority) ? formData.priority : "normal";
@@ -2868,6 +2942,33 @@ function addUserToProject(project, userId, role, team) {
   }
 }
 
+function updateProjectMemberRole(userId, role, team) {
+  const project = currentProject();
+  if (!project || !canManageProject() || !project.memberIds.includes(userId) || !ALLOWED_ROLES.has(role) || !ALLOWED_TEAMS.has(team)) {
+    return false;
+  }
+  if (project.ownerId === userId) {
+    return false;
+  }
+
+  project.memberProfiles[userId] = {
+    ...(project.memberProfiles[userId] || {}),
+    role,
+    team,
+    title: role === "admin" ? "Admin" : role === "lead" ? `${team} kaptanlığı` : `${team} ekibi`,
+  };
+  if (role === "admin" && !project.adminIds.includes(userId)) {
+    project.adminIds.push(userId);
+  }
+  if (role !== "admin") {
+    project.adminIds = project.adminIds.filter((adminId) => adminId !== userId);
+  }
+  saveState();
+  logAction("project.member.role.updated", { projectId: project.id, userId, role, team });
+  render();
+  return true;
+}
+
 function validProjectMemberIds(project) {
   return (project?.memberIds || []).filter((userId) => state.users.some((user) => user.id === userId));
 }
@@ -2931,7 +3032,6 @@ async function addSystemUser(name, email, password) {
     id: uid(),
     name: cleanName,
     email: normalized,
-    password: cleanPassword,
     ...(await hashPassword(cleanPassword)),
   };
   state.users.push(user);
@@ -2985,7 +3085,13 @@ function deleteSystemUser(userId) {
     delete project.memberProfiles[userId];
   });
   state.invites = state.invites.filter((invite) => invite.userId !== userId);
-  state.users = state.users.filter((user) => user.id !== userId);
+  const deletedUser = state.users.find((user) => user.id === userId);
+  if (deletedUser) {
+    deletedUser.name = "Silinmiş kullanıcı";
+    deletedUser.deleted = true;
+    delete deletedUser.passwordHash;
+    delete deletedUser.passwordSalt;
+  }
   state.tasks.forEach((task) => {
     if (task.assigneeId === userId) {
       const project = state.projects.find((item) => item.id === task.projectId);

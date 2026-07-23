@@ -89,5 +89,79 @@ https://KULLANICI_ADIN.pythonanywhere.com/api/health
   test etmek icindir.
 - Veritabani dosyasi `app_data.sqlite3` proje klasorunde olusur.
 - Yuklenen Word sablonlari `uploaded_templates/` klasorune yazilir.
-- Test surumunde sifreler acik metin olarak tutulur; gercek yayinda bunu tekrar
-  hash'li hale getirmek gerekir.
+- Demo hesaplari PBKDF2-HMAC-SHA256 hash ve kullaniciya ozel salt ile saklanir;
+  yine de PythonAnywhere'de yayina almadan once demo parolalarini degistirin.
+
+## English
+
+# PythonAnywhere Deployment Notes
+
+Python 3.12 is recommended. The application uses Python 3.10+ syntax and has no
+external dependency in the root `requirements.txt`.
+
+## 1. Upload the project
+
+Place the repository at:
+
+```bash
+/home/YOUR_USERNAME/Project_Management
+```
+
+Or clone it from a Bash console:
+
+```bash
+cd /home/YOUR_USERNAME
+git clone https://github.com/Alibehram11/Project_Management.git
+cd Project_Management
+```
+
+## 2. Configure the virtual environment
+
+```bash
+mkvirtualenv --python=/usr/bin/python3.12 project-management
+pip install -r requirements.txt
+```
+
+## 3. Create the web app
+
+In the PythonAnywhere Web tab select **Add a new web app**, choose **Manual
+configuration**, select Python 3.12 and set the virtualenv to:
+
+```text
+/home/YOUR_USERNAME/.virtualenvs/project-management
+```
+
+## 4. Configure WSGI
+
+Use the generated WSGI file or copy this configuration:
+
+```python
+import sys
+
+path = "/home/YOUR_USERNAME/Project_Management"
+if path not in sys.path:
+    sys.path.insert(0, path)
+
+from server import application
+```
+
+## 5. Verify the deployment
+
+Run:
+
+```bash
+cd /home/YOUR_USERNAME/Project_Management
+python server.py --check
+```
+
+Reload the web app and open:
+
+```text
+https://YOUR_USERNAME.pythonanywhere.com/api/health
+```
+
+The response should contain `"ok": true`. `python server.py` is for local
+development only; PythonAnywhere serves the application through WSGI.
+
+Uploaded Word templates are stored in `uploaded_templates/`. Demo credentials
+are hashed, but they must still be changed before public deployment.

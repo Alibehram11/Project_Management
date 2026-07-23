@@ -5,19 +5,36 @@ import base64
 import binascii
 import hashlib
 import json
+import math
 import mimetypes
 import os
+import posixpath
 import secrets
 import sqlite3
+import stat
 import sys
+import threading
 import time
+import unicodedata
 import zipfile
 from datetime import datetime, timezone
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from io import BytesIO
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from urllib.parse import unquote, urlparse
+from xml.etree import ElementTree
 from xml.sax.saxutils import escape
+
+from advanced_rules import (
+    DomainError,
+    export_tasks_csv,
+    export_tasks_pdf,
+    is_system_admin,
+    managed_project_ids,
+    prepare_state_transition,
+    redact_sensitive_fields,
+    visible_state,
+)
 
 
 ROOT = Path(__file__).resolve().parent
@@ -26,10 +43,20 @@ TEMPLATE_DIR = ROOT / "proje_yonetimi_ogrenci_belgeleri_word"
 UPLOAD_DIR = ROOT / "uploaded_templates"
 STATE_KEY = "main"
 MAX_UPLOAD_BYTES = 12 * 1024 * 1024
+MAX_DOCX_UNCOMPRESSED_BYTES = 36 * 1024 * 1024
+MAX_DOCX_ENTRY_BYTES = 10 * 1024 * 1024
+MAX_DOCX_XML_BYTES = 5 * 1024 * 1024
+MAX_DOCX_ENTRIES = 250
+MAX_DOCX_COMPRESSION_RATIO = 150
+MAX_SANITIZE_DEPTH = 8
+MAX_SANITIZE_NODES = 250_000
+MAX_SANITIZE_STRING = 20_000
 SESSION_TTL_SECONDS = 8 * 60 * 60
+PASSWORD_ITERATIONS = 120_000
 RATE_WINDOW_SECONDS = 60
 RATE_LIMIT_DEFAULT = 90
 RATE_LIMIT_LOGIN = 12
+RATE_LIMIT_LOGIN_ACCOUNT = 12
 JSON_MIME = "application/json; charset=utf-8"
 DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 BLOCKED_STATIC_PATHS = {"/app_data.sqlite3", "/server.py", "/wsgi.py"}
@@ -44,7 +71,11 @@ ALLOWED_STATIC_PATHS = {
 }
 _WSGI_READY = False
 API_SESSIONS: dict[str, dict] = {}
+PASSWORD_RESET_TOKENS: dict[str, dict] = {}
 RATE_BUCKETS: dict[tuple[str, str], list[float]] = {}
+RATE_LOCK = threading.Lock()
+PASSWORD_RESET_LOCK = threading.Lock()
+SESSION_LOCK = threading.RLock()
 SECURITY_HEADERS = [
     ("X-Content-Type-Options", "nosniff"),
     ("X-Frame-Options", "DENY"),
@@ -67,14 +98,14 @@ CONFIGURED_ALLOWED_HOSTS = {
 ALLOWED_HOSTS = DEFAULT_ALLOWED_HOSTS | CONFIGURED_ALLOWED_HOSTS
 
 DEMO_USERS = [
-    {"id": "demo-admin", "name": "Ana Admin", "email": "admin@proje.local", "password": "123456", "role": "admin"},
-    {"id": "demo-yazilim", "name": "Yazilim Kaptani", "email": "yazilim@proje.local", "password": "123456", "role": "member"},
-    {"id": "demo-yazilim2", "name": "Yazilim Uyesi", "email": "yazilim2@proje.local", "password": "123456", "role": "member"},
-    {"id": "demo-tasarim", "name": "Tasarim Uyesi", "email": "tasarim@proje.local", "password": "123456", "role": "member"},
-    {"id": "demo-mekanik", "name": "Mekanik Kaptani", "email": "mekanik@proje.local", "password": "123456", "role": "member"},
-    {"id": "demo-elektronik", "name": "Elektronik Uyesi", "email": "elektronik@proje.local", "password": "123456", "role": "member"},
-    {"id": "demo-mentor", "name": "Mentor Kullanicisi", "email": "mentor@proje.local", "password": "123456", "role": "admin"},
-    {"id": "demo-atolye", "name": "Atolye Sorumlusu", "email": "atolye@proje.local", "password": "123456", "role": "admin"},
+    {"id": "demo-admin", "name": "Ana Admin", "email": "admin@proje.local", "passwordSalt": "pm-v6-admin-local-salt", "passwordHash": "9e0a8cd3a50f77f45f29e0e1199abd3b620bff1376be00eaf826d111cfa9bdca", "role": "admin"},
+    {"id": "demo-yazilim", "name": "Yazilim Kaptani", "email": "yazilim@proje.local", "passwordSalt": "pm-v6-yazilim-local-salt", "passwordHash": "6002e2485969c6a524b3740122e184b06eb852802d2a065bd0c440d09f404cc5", "role": "member"},
+    {"id": "demo-yazilim2", "name": "Yazilim Uyesi", "email": "yazilim2@proje.local", "passwordSalt": "pm-v6-yazilim2-local-salt", "passwordHash": "030099ef3168bd991f2af6455d782860ee870c9c61320671537b1fc10e8362dc", "role": "member"},
+    {"id": "demo-tasarim", "name": "Tasarim Uyesi", "email": "tasarim@proje.local", "passwordSalt": "pm-v6-tasarim-local-salt", "passwordHash": "acf18a9711dfe1341926b5bab760ca5339ff170924fd4447663d2c3673c811f9", "role": "member"},
+    {"id": "demo-mekanik", "name": "Mekanik Kaptani", "email": "mekanik@proje.local", "passwordSalt": "pm-v6-mekanik-local-salt", "passwordHash": "ee2f922a7740086df8ad6cf3f3312cc011d9de447d58f7c23a3e4cb506298a16", "role": "member"},
+    {"id": "demo-elektronik", "name": "Elektronik Uyesi", "email": "elektronik@proje.local", "passwordSalt": "pm-v6-elektronik-local-salt", "passwordHash": "98445863cc4106925ab906d51860b5f5405f3879cc9651e22b1e3f5ed5a7ec08", "role": "member"},
+    {"id": "demo-mentor", "name": "Mentor Kullanicisi", "email": "mentor@proje.local", "passwordSalt": "pm-v6-mentor-local-salt", "passwordHash": "66d6b31ce933151bcfa7d3f92ed53022607b6e10e96c6152dd9b7a4e236f793b", "role": "admin"},
+    {"id": "demo-atolye", "name": "Atolye Sorumlusu", "email": "atolye@proje.local", "passwordSalt": "pm-v6-atolye-local-salt", "passwordHash": "0c30b84311c391a44dfc4932cf49e1388d2cc3bf3834da6d435b38842085e2c6", "role": "admin"},
 ]
 
 KNOWN_TEMPLATES = {
@@ -89,6 +120,23 @@ KNOWN_TEMPLATES = {
     "fr09": "09_FR-09_Test_Plani_Hata_Defteri.docx",
     "fr10": "10_FR-10_Yarisma_Gunu_Kapanis_Raporu.docx",
 }
+
+BLOCKED_JSON_KEYS = {"__proto__", "prototype", "constructor"}
+BLOCKED_JSON_KEY_FOLDS = {key.casefold() for key in BLOCKED_JSON_KEYS}
+BLOCKED_DOCX_PARTS = {
+    "word/vbaproject.bin",
+    "word/vbadata.xml",
+}
+BLOCKED_DOCX_PREFIXES = (
+    "word/activex/",
+    "word/embeddings/",
+    "word/externallinks/",
+    "customui/",
+)
+BLOCKED_DOCX_EXTENSIONS = {".bin", ".chm", ".com", ".dll", ".exe", ".hta", ".js", ".jse", ".lnk", ".ps1", ".scr", ".svg", ".vbe", ".vbs"}
+WORD_DOCUMENT_CONTENT_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"
+CONTENT_TYPES_NS = "http://schemas.openxmlformats.org/package/2006/content-types"
+RELATIONSHIPS_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
 
 
 def now_iso() -> str:
@@ -116,13 +164,41 @@ def client_ip_from_headers(headers: dict | object) -> str:
 def rate_limit_key(ip: str, bucket: str, limit: int) -> bool:
     now = time.time()
     key = (ip, bucket)
-    entries = [item for item in RATE_BUCKETS.get(key, []) if now - item < RATE_WINDOW_SECONDS]
-    if len(entries) >= limit:
+    with RATE_LOCK:
+        entries = [item for item in RATE_BUCKETS.get(key, []) if now - item < RATE_WINDOW_SECONDS]
+        if len(entries) >= limit:
+            RATE_BUCKETS[key] = entries
+            return False
+        entries.append(now)
         RATE_BUCKETS[key] = entries
-        return False
-    entries.append(now)
-    RATE_BUCKETS[key] = entries
     return True
+
+
+def login_account_rate_limit(email: object) -> bool:
+    normalized = safe_text(email, 320).strip().casefold()
+    account_key = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+    return rate_limit_key("login-account", account_key, RATE_LIMIT_LOGIN_ACCOUNT)
+
+
+def password_record(password: object, salt: str | None = None) -> dict[str, str]:
+    password_text = str(password or "")
+    password_salt = salt or secrets.token_hex(16)
+    digest = hashlib.pbkdf2_hmac(
+        "sha256",
+        password_text.encode("utf-8"),
+        password_salt.encode("utf-8"),
+        PASSWORD_ITERATIONS,
+    ).hex()
+    return {"passwordHash": digest, "passwordSalt": password_salt}
+
+
+def password_matches(user: dict, password: object) -> bool:
+    stored_hash = str(user.get("passwordHash") or "")
+    stored_salt = str(user.get("passwordSalt") or "")
+    if not stored_hash or not stored_salt:
+        return False
+    attempted = password_record(password, stored_salt)["passwordHash"]
+    return secrets.compare_digest(stored_hash, attempted)
 
 
 def load_app_state() -> dict | None:
@@ -135,6 +211,23 @@ def load_app_state() -> dict | None:
     except json.JSONDecodeError:
         return None
     return payload if isinstance(payload, dict) else None
+
+
+def load_state_record(conn: sqlite3.Connection | None = None) -> tuple[dict | None, int]:
+    owns_connection = conn is None
+    connection = conn or connect_db()
+    try:
+        row = connection.execute("SELECT payload_json, revision FROM app_state WHERE key = ?", (STATE_KEY,)).fetchone()
+    finally:
+        if owns_connection:
+            connection.close()
+    if not row:
+        return None, 0
+    try:
+        payload = json.loads(row[0])
+    except json.JSONDecodeError:
+        return None, int(row[1] or 0)
+    return (payload if isinstance(payload, dict) else None), int(row[1] or 0)
 
 
 def user_role_from_state(state: dict | None, user_id: str, email: str) -> str:
@@ -158,16 +251,21 @@ def find_auth_user(email: str, password: str) -> dict | None:
     if not users:
         users.extend(DEMO_USERS)
 
+    supplied_email = hashlib.sha256(normalized_email.encode("utf-8")).digest()
+    matched_user = None
     for user in users:
-        if str(user.get("email", "")).lower() != normalized_email:
-            continue
-        if not secrets.compare_digest(str(user.get("password") or ""), str(password or "")):
-            continue
+        candidate_email = str(user.get("email", "")).strip().casefold()
+        candidate_email_digest = hashlib.sha256(candidate_email.encode("utf-8")).digest()
+        credentials_match = secrets.compare_digest(candidate_email_digest, supplied_email) and password_matches(user, password)
+        if credentials_match and not user.get("deleted"):
+            matched_user = user
+
+    if matched_user:
         return {
-            "id": str(user.get("id") or normalized_email),
-            "name": str(user.get("name") or normalized_email),
+            "id": str(matched_user.get("id") or normalized_email),
+            "name": str(matched_user.get("name") or normalized_email),
             "email": normalized_email,
-            "role": user.get("role") or user_role_from_state(state, str(user.get("id") or ""), normalized_email),
+            "role": matched_user.get("role") or user_role_from_state(state, str(matched_user.get("id") or ""), normalized_email),
         }
     return None
 
@@ -175,15 +273,78 @@ def find_auth_user(email: str, password: str) -> dict | None:
 def create_api_session(user: dict) -> dict:
     token = secrets.token_urlsafe(32)
     csrf = secrets.token_urlsafe(32)
-    API_SESSIONS[token] = {
-        "userId": user["id"],
-        "email": user["email"],
-        "name": user["name"],
-        "role": user.get("role", "member"),
-        "csrf": csrf,
-        "expires": time.time() + SESSION_TTL_SECONDS,
-    }
+    with SESSION_LOCK:
+        API_SESSIONS[token] = {
+            "userId": user["id"],
+            "email": user["email"],
+            "name": user["name"],
+            "role": user.get("role", "member"),
+            "csrf": csrf,
+            "expires": time.time() + SESSION_TTL_SECONDS,
+        }
     return {"token": token, "csrfToken": csrf, "user": {key: user[key] for key in ("id", "name", "email", "role")}}
+
+
+def issue_password_reset(email: str, ttl_seconds: int = 900) -> str:
+    normalized_email = safe_text(email, 320).strip().casefold()
+    token = secrets.token_urlsafe(32)
+    token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    with PASSWORD_RESET_LOCK:
+        PASSWORD_RESET_TOKENS[token_hash] = {
+            "email": normalized_email,
+            "expires": time.time() + max(1, min(int(ttl_seconds), 3600)),
+        }
+    return token
+
+
+def consume_password_reset(token: str, new_password: str) -> bool:
+    token_hash = hashlib.sha256(str(token).encode("utf-8")).hexdigest()
+    with PASSWORD_RESET_LOCK:
+        record = PASSWORD_RESET_TOKENS.get(token_hash)
+        if not record:
+            return False
+        if record.get("expires", 0) < time.time():
+            PASSWORD_RESET_TOKENS.pop(token_hash, None)
+            return False
+        if len(str(new_password)) < 6:
+            return False
+        with connect_db() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            state, revision = load_state_record(conn)
+            if not state:
+                return False
+            user = next(
+                (
+                    item
+                    for item in state.get("users", [])
+                    if isinstance(item, dict) and str(item.get("email", "")).casefold() == record["email"] and not item.get("deleted")
+                ),
+                None,
+            )
+            if not user:
+                return False
+            user.update(password_record(new_password))
+            user.pop("password", None)
+            conn.execute(
+                "UPDATE app_state SET payload_json = ?, revision = ?, updated_at = ?, updated_by = ?, reason = ? WHERE key = ?",
+                (json.dumps(state, ensure_ascii=False), revision + 1, now_iso(), record["email"], "password-reset", STATE_KEY),
+            )
+        PASSWORD_RESET_TOKENS.pop(token_hash, None)
+    with SESSION_LOCK:
+        for session_token, session in list(API_SESSIONS.items()):
+            if str(session.get("email", "")).casefold() == record["email"]:
+                API_SESSIONS.pop(session_token, None)
+    db_log(record["email"], "auth.password.reset", {})
+    return True
+
+
+def revoke_api_session(headers: dict) -> dict | None:
+    authorization = headers.get("Authorization") or headers.get("HTTP_AUTHORIZATION") or ""
+    token = authorization.removeprefix("Bearer ").strip() if authorization.startswith("Bearer ") else ""
+    if not token:
+        return None
+    with SESSION_LOCK:
+        return API_SESSIONS.pop(token, None)
 
 
 def auth_from_headers(headers: dict, require_csrf: bool = False, admin: bool = False) -> tuple[dict | None, str | None]:
@@ -191,15 +352,37 @@ def auth_from_headers(headers: dict, require_csrf: bool = False, admin: bool = F
     if not authorization.startswith("Bearer "):
         return None, "auth-required"
     token = authorization.removeprefix("Bearer ").strip()
-    session = API_SESSIONS.get(token)
-    if not session or session.get("expires", 0) < time.time():
-        API_SESSIONS.pop(token, None)
-        return None, "auth-expired"
+    with SESSION_LOCK:
+        session = API_SESSIONS.get(token)
+        if not session or session.get("expires", 0) < time.time():
+            API_SESSIONS.pop(token, None)
+            return None, "auth-expired"
     if require_csrf:
         csrf = headers.get("X-CSRF-Token") or headers.get("HTTP_X_CSRF_TOKEN") or ""
         if not secrets.compare_digest(csrf, session.get("csrf", "")):
             return None, "csrf-token-invalid"
-    if admin and session.get("role") != "admin":
+    state = load_app_state()
+    if state:
+        active_user = next(
+            (
+                user
+                for user in state.get("users", [])
+                if isinstance(user, dict)
+                and not user.get("deleted")
+                and (
+                    str(user.get("id")) == str(session.get("userId"))
+                    or str(user.get("email", "")).casefold() == str(session.get("email", "")).casefold()
+                )
+            ),
+            None,
+        )
+        if not active_user:
+            with SESSION_LOCK:
+                API_SESSIONS.pop(token, None)
+            return None, "auth-revoked"
+        session["userId"] = str(active_user.get("id"))
+        session["role"] = user_role_from_state(state, session["userId"], session["email"])
+    if admin and not is_system_admin(session) and not managed_project_ids(state or {}, session):
         return None, "admin-required"
     session["expires"] = time.time() + SESSION_TTL_SECONDS
     return session, None
@@ -209,6 +392,7 @@ def safe_error(error: str) -> str:
     allowed = {
         "auth-required",
         "auth-expired",
+        "auth-revoked",
         "admin-required",
         "csrf-token-invalid",
         "origin-blocked",
@@ -223,8 +407,37 @@ def safe_error(error: str) -> str:
         "file-too-large",
         "not-found",
         "method-not-allowed",
+        "revision-conflict",
+        "revision-required",
+        "project-access-denied",
+        "project-create-denied",
+        "system-admin-required",
+        "task-field-denied",
+        "project-locked",
+        "email-conflict",
+        "state-invalid",
+        "text-too-long",
+        "task-dependency-invalid",
+        "task-dependency-cycle",
+        "parent-task-invalid",
+        "subtask-deadline-invalid",
+        "project-admin-required",
+        "project-owner-invalid",
+        "project-member-invalid",
+        "project-admin-invalid",
+        "task-project-invalid",
+        "task-assignee-invalid",
+        "date-invalid",
     }
     return error if error in allowed else "bad-request"
+
+
+def record_internal_error(path: object, exc: BaseException) -> None:
+    """Record only non-sensitive diagnostics and never break the error response."""
+    try:
+        db_log("system", "server.error", {"path": safe_text(path, 300), "type": type(exc).__name__})
+    except Exception:
+        pass
 
 
 def connect_db() -> sqlite3.Connection:
@@ -245,10 +458,14 @@ def init_db() -> None:
                 payload_json TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 updated_by TEXT,
-                reason TEXT
+                reason TEXT,
+                revision INTEGER NOT NULL DEFAULT 0
             )
             """
         )
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(app_state)")}
+        if "revision" not in columns:
+            conn.execute("ALTER TABLE app_state ADD COLUMN revision INTEGER NOT NULL DEFAULT 0")
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS logs (
@@ -285,6 +502,22 @@ def init_db() -> None:
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS outbox (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                kind TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'queued',
+                attempts INTEGER NOT NULL DEFAULT 0,
+                last_error TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                dedupe_key TEXT UNIQUE
+            )
+            """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_outbox_status ON outbox (status, id)")
         row = conn.execute("SELECT payload_json FROM app_state WHERE key = ?", (STATE_KEY,)).fetchone()
         if row:
             clean_payload = sanitize_state_payload(json.loads(row[0]))
@@ -295,6 +528,7 @@ def init_db() -> None:
 
 
 def db_log(actor: str, action: str, detail: object | None = None) -> None:
+    safe_detail = redact_sensitive_fields(sanitize_value(detail or {}, depth=0))
     with connect_db() as conn:
         conn.execute(
             "INSERT INTO logs (ts, actor, action, detail_json) VALUES (?, ?, ?, ?)",
@@ -302,7 +536,7 @@ def db_log(actor: str, action: str, detail: object | None = None) -> None:
                 now_iso(),
                 safe_text(actor or "anonim", 120),
                 safe_text(action or "unknown", 120),
-                json.dumps(sanitize_value(detail or {}, depth=0), ensure_ascii=False),
+                json.dumps(safe_detail, ensure_ascii=False),
             ),
         )
         conn.execute(
@@ -310,33 +544,134 @@ def db_log(actor: str, action: str, detail: object | None = None) -> None:
         )
 
 
-def json_response(handler: SimpleHTTPRequestHandler, payload: object, status: int = 200) -> None:
-    data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-    handler.send_response(status)
-    handler.send_header("Content-Type", JSON_MIME)
-    handler.send_header("Content-Length", str(len(data)))
-    handler.end_headers()
-    handler.wfile.write(data)
+def enqueue_outbox(conn: sqlite3.Connection, kind: str, payload: dict, dedupe_key: str) -> None:
+    now = now_iso()
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO outbox (kind, payload_json, status, attempts, created_at, updated_at, dedupe_key)
+        VALUES (?, ?, 'queued', 0, ?, ?, ?)
+        """,
+        (
+            safe_text(kind, 80),
+            json.dumps(sanitize_value(payload), ensure_ascii=False, allow_nan=False),
+            now,
+            now,
+            safe_text(dedupe_key, 240),
+        ),
+    )
+
+
+def queue_assignment_notifications(conn: sqlite3.Connection, current: dict, candidate: dict, revision: int) -> None:
+    old_tasks = {str(task.get("id")): task for task in current.get("tasks", []) if isinstance(task, dict)}
+    users = {str(user.get("id")): user for user in candidate.get("users", []) if isinstance(user, dict)}
+    with SESSION_LOCK:
+        active_sessions = list(API_SESSIONS.items())
+    for task in candidate.get("tasks", []):
+        if not isinstance(task, dict) or not task.get("id"):
+            continue
+        old_task = old_tasks.get(str(task["id"]))
+        assignee_id = str(task.get("assigneeId") or "")
+        if old_task and str(old_task.get("assigneeId") or "") == assignee_id:
+            continue
+        user = users.get(assignee_id) or {}
+        devices = [
+            hashlib.sha256(token.encode("utf-8")).hexdigest()[:16]
+            for token, api_session in active_sessions
+            if str(api_session.get("userId")) == assignee_id and api_session.get("expires", 0) >= time.time()
+        ] or ["account"]
+        for device in devices:
+            enqueue_outbox(
+                conn,
+                "task-assigned",
+                {
+                    "taskId": task["id"],
+                    "projectId": task.get("projectId"),
+                    "assigneeId": assignee_id,
+                    "email": user.get("email", ""),
+                    "device": device,
+                    "revision": revision,
+                },
+                f"task-assigned:{task['id']}:{assignee_id}:{device}:{revision}",
+            )
+
+
+def process_outbox(sender, limit: int = 100, max_attempts: int = 3) -> dict:
+    with connect_db() as conn:
+        rows = conn.execute(
+            "SELECT id, kind, payload_json, attempts FROM outbox WHERE status IN ('queued', 'retry') ORDER BY id LIMIT ?",
+            (max(1, min(int(limit), 500)),),
+        ).fetchall()
+    sent = failed = retried = 0
+    for row_id, kind, payload_json, attempts in rows:
+        payload = json.loads(payload_json)
+        try:
+            sender(kind, payload)
+            status, error = "sent", ""
+            sent += 1
+        except Exception as exc:
+            next_attempt = int(attempts) + 1
+            status = "failed" if next_attempt >= max_attempts else "retry"
+            error = type(exc).__name__
+            failed += status == "failed"
+            retried += status == "retry"
+        with connect_db() as conn:
+            conn.execute(
+                "UPDATE outbox SET status = ?, attempts = attempts + 1, last_error = ?, updated_at = ? WHERE id = ?",
+                (status, error, now_iso(), row_id),
+            )
+    return {"processed": len(rows), "sent": sent, "retried": retried, "failed": failed}
 
 
 def safe_text(value: object, limit: int = 5000) -> str:
-    text = str(value or "")
-    text = "".join(char if char >= " " and char != "\x7f" else " " for char in text)
-    return text[:limit]
+    text = unicodedata.normalize("NFC", str(value or ""))
+    clean = []
+    for char in text:
+        category = unicodedata.category(char)
+        if char in {"\n", "\r", "\t"}:
+            clean.append(char)
+        elif category in {"Cc", "Cf", "Cs"}:
+            clean.append(" ")
+        else:
+            clean.append(char)
+    return "".join(clean)[:limit]
 
 
-def sanitize_value(value: object, depth: int = 0) -> object:
-    if depth > 8:
-        return ""
+def sanitize_value(value: object, depth: int = 0, budget: list[int] | None = None) -> object:
+    if budget is None:
+        budget = [MAX_SANITIZE_NODES]
+    if depth > MAX_SANITIZE_DEPTH or budget[0] <= 0:
+        return None
+    budget[0] -= 1
     if isinstance(value, dict):
-        return {safe_text(key, 120): sanitize_value(item, depth + 1) for key, item in list(value.items())[:200]}
+        clean: dict[str, object] = {}
+        for key, item in list(value.items())[:200]:
+            clean_key = safe_text(key, 120).strip()
+            if not clean_key or clean_key.casefold() in BLOCKED_JSON_KEY_FOLDS or clean_key in clean:
+                continue
+            clean[clean_key] = sanitize_value(item, depth + 1, budget)
+        return clean
     if isinstance(value, list):
-        return [sanitize_value(item, depth + 1) for item in value[:500]]
+        return [sanitize_value(item, depth + 1, budget) for item in value[:20_000] if budget[0] > 0]
     if isinstance(value, str):
-        return safe_text(value, 200_000)
-    if isinstance(value, (int, float, bool)) or value is None:
+        return safe_text(value, MAX_SANITIZE_STRING)
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, (int, bool)) or value is None:
         return value
-    return safe_text(value)
+    return safe_text(value, MAX_SANITIZE_STRING)
+
+
+def parse_json_object(raw: bytes) -> dict:
+    def reject_constant(_: str) -> None:
+        raise ValueError("json-object-required")
+
+    try:
+        payload = json.loads(raw.decode("utf-8"), parse_constant=reject_constant)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise ValueError("bad-request") from None
+    if not isinstance(payload, dict):
+        raise ValueError("json-object-required")
+    return payload
 
 
 def safe_download_name(value: object, fallback: str = "belge.docx") -> str:
@@ -362,20 +697,6 @@ def parse_content_length(value: str | None) -> int:
     if length > MAX_UPLOAD_BYTES:
         raise ValueError("request-too-large")
     return length
-
-
-def read_json(handler: SimpleHTTPRequestHandler) -> dict:
-    content_type = handler.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
-    length = parse_content_length(handler.headers.get("Content-Length"))
-    if length and content_type != "application/json":
-        raise ValueError("content-type-json-required")
-    raw = handler.rfile.read(length)
-    if not raw:
-        return {}
-    payload = json.loads(raw.decode("utf-8"))
-    if not isinstance(payload, dict):
-        raise ValueError("json-object-required")
-    return payload
 
 
 def template_path(template_id: str | None, file_name: str | None) -> Path | None:
@@ -465,7 +786,9 @@ def minimal_docx(payload: dict, source_file: str) -> bytes:
 def filled_docx(payload: dict) -> tuple[bytes, str]:
     source = template_path(payload.get("templateId"), payload.get("fileName"))
     source_name = source.name if source else str(payload.get("fileName") or "boş şablon")
-    if not source or not zipfile.is_zipfile(source):
+    source_data = source.read_bytes() if source and source.is_file() and source.stat().st_size <= MAX_UPLOAD_BYTES else b""
+    source_valid, _ = validate_docx_bytes(source_data)
+    if not source or not source_valid:
         return minimal_docx(payload, source_name), source_name
 
     from io import BytesIO
@@ -484,33 +807,104 @@ def filled_docx(payload: dict) -> tuple[bytes, str]:
     return output.getvalue(), source_name
 
 
+def parse_safe_docx_xml(data: bytes) -> ElementTree.Element:
+    if len(data) > MAX_DOCX_XML_BYTES:
+        raise ValueError("file-too-large")
+    upper = data.upper()
+    if b"<!DOCTYPE" in upper or b"<!ENTITY" in upper:
+        raise ValueError("invalid-docx")
+    try:
+        return ElementTree.fromstring(data)
+    except ElementTree.ParseError:
+        raise ValueError("invalid-docx") from None
+
+
+def canonical_docx_part(name: str) -> str:
+    normalized = name.replace("\\", "/")
+    path = PurePosixPath(normalized)
+    if not normalized or normalized.startswith("/") or any(part in {"", ".", ".."} for part in path.parts):
+        raise ValueError("invalid-docx")
+    return path.as_posix().casefold()
+
+
+def relationship_source_dir(rels_name: str) -> str:
+    if rels_name == "_rels/.rels":
+        return ""
+    marker = "/_rels/"
+    if marker not in rels_name or not rels_name.endswith(".rels"):
+        raise ValueError("invalid-docx")
+    prefix, leaf = rels_name.split(marker, 1)
+    source_name = leaf[:-5]
+    return posixpath.dirname(f"{prefix}/{source_name}")
+
+
 def validate_docx_bytes(data: bytes) -> tuple[bool, str]:
-    if len(data) > MAX_UPLOAD_BYTES:
-        return False, "file-too-large"
+    if not data or len(data) > MAX_UPLOAD_BYTES:
+        return False, "file-too-large" if len(data) > MAX_UPLOAD_BYTES else "invalid-docx"
     try:
         with zipfile.ZipFile(BytesIO(data), "r") as docx:
-            names = docx.namelist()
-            if len(names) > 250:
-                return False, "invalid-docx"
-            total = 0
-            for entry in docx.infolist():
-                name = entry.filename.replace("\\", "/").lower()
-                total += entry.file_size
-                if total > MAX_UPLOAD_BYTES * 3:
-                    return False, "file-too-large"
-                if name.startswith("/") or "../" in name or name.startswith("../"):
-                    return False, "invalid-docx"
-                if name.endswith("vbaproject.bin") or "vba" in name or name.endswith(".exe"):
-                    return False, "invalid-docx"
-                if name.endswith(".rels"):
-                    rels = docx.read(entry.filename)[:1_000_000].decode("utf-8", errors="ignore").lower()
-                    if "targetmode=\"external\"" in rels or "targetmode='external'" in rels:
-                        return False, "invalid-docx"
+            entries = docx.infolist()
+            if not entries or len(entries) > MAX_DOCX_ENTRIES:
+                raise ValueError("invalid-docx")
+
+            parts: dict[str, zipfile.ZipInfo] = {}
+            total_size = 0
+            for entry in entries:
+                name = canonical_docx_part(entry.filename)
+                if name in parts:
+                    raise ValueError("invalid-docx")
+                parts[name] = entry
+                if entry.flag_bits & 0x1 or stat.S_ISLNK(entry.external_attr >> 16):
+                    raise ValueError("invalid-docx")
+                if entry.file_size < 0 or entry.file_size > MAX_DOCX_ENTRY_BYTES:
+                    raise ValueError("file-too-large")
+                total_size += entry.file_size
+                if total_size > MAX_DOCX_UNCOMPRESSED_BYTES:
+                    raise ValueError("file-too-large")
+                if entry.file_size and entry.compress_size == 0:
+                    raise ValueError("invalid-docx")
+                if entry.compress_size and entry.file_size / entry.compress_size > MAX_DOCX_COMPRESSION_RATIO:
+                    raise ValueError("invalid-docx")
+                suffix = PurePosixPath(name).suffix
+                if name in BLOCKED_DOCX_PARTS or name.startswith(BLOCKED_DOCX_PREFIXES) or suffix in BLOCKED_DOCX_EXTENSIONS:
+                    raise ValueError("invalid-docx")
+
             required = {"[content_types].xml", "_rels/.rels", "word/document.xml"}
-            if not required.issubset({name.lower() for name in names}):
-                return False, "invalid-docx"
-    except zipfile.BadZipFile:
+            if not required.issubset(parts):
+                raise ValueError("invalid-docx")
+
+            content_types = parse_safe_docx_xml(docx.read(parts["[content_types].xml"]))
+            if content_types.tag != f"{{{CONTENT_TYPES_NS}}}Types":
+                raise ValueError("invalid-docx")
+            document_types = {
+                node.attrib.get("ContentType", "").casefold()
+                for node in content_types
+                if node.attrib.get("PartName", "").casefold() == "/word/document.xml"
+            }
+            if document_types != {WORD_DOCUMENT_CONTENT_TYPE}:
+                raise ValueError("invalid-docx")
+            if any("macroenabled" in node.attrib.get("ContentType", "").casefold() for node in content_types):
+                raise ValueError("invalid-docx")
+
+            for name, entry in parts.items():
+                if name.endswith(".xml") or name.endswith(".rels"):
+                    root = parse_safe_docx_xml(docx.read(entry))
+                    if name.endswith(".rels"):
+                        if root.tag != f"{{{RELATIONSHIPS_NS}}}Relationships":
+                            raise ValueError("invalid-docx")
+                        for relationship in root:
+                            if relationship.attrib.get("TargetMode", "").casefold() == "external":
+                                raise ValueError("invalid-docx")
+                            target = relationship.attrib.get("Target", "").replace("\\", "/")
+                            if not target or target.startswith(("/", "//")):
+                                raise ValueError("invalid-docx")
+                            resolved_target = posixpath.normpath(posixpath.join(relationship_source_dir(name), target)).casefold()
+                            if resolved_target == ".." or resolved_target.startswith("../") or resolved_target not in parts:
+                                raise ValueError("invalid-docx")
+    except (zipfile.BadZipFile, RuntimeError, OSError):
         return False, "invalid-docx"
+    except ValueError as exc:
+        return False, safe_error(str(exc))
     return True, "ok"
 
 
@@ -522,12 +916,69 @@ def sanitize_state_payload(payload: object) -> object:
         return {}
     users = clean.get("users")
     if isinstance(users, list):
-        clean["users"] = [
-            dict(user)
-            for user in users
-            if isinstance(user, dict)
-        ]
+        normalized_users = []
+        for user in users:
+            if not isinstance(user, dict):
+                continue
+            normalized = dict(user)
+            if not normalized.get("passwordHash") and normalized.get("password"):
+                normalized.update(password_record(normalized["password"]))
+            normalized.pop("password", None)
+            normalized_users.append(normalized)
+        clean["users"] = normalized_users
     return clean
+
+
+def save_state_update(payload: dict, session: dict) -> tuple[dict, int]:
+    if "revision" not in payload:
+        raise DomainError("revision-required", 409)
+    try:
+        expected_revision = int(payload.get("revision"))
+    except (TypeError, ValueError):
+        raise DomainError("revision-conflict", 409) from None
+    incoming = sanitize_state_payload(payload.get("payload") or {})
+    reason = safe_text(payload.get("reason", "manual"), 200)
+    with connect_db() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        current, current_revision = load_state_record(conn)
+        if current is None and not is_system_admin(session):
+            raise DomainError("system-admin-required", 403)
+        current = current or {"users": [], "projects": [], "tasks": []}
+        candidate = prepare_state_transition(current, incoming, session, expected_revision, current_revision)
+        next_revision = current_revision + 1
+        queue_assignment_notifications(conn, current, candidate, next_revision)
+        conn.execute(
+            """
+            INSERT INTO app_state (key, payload_json, updated_at, updated_by, reason, revision)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(key) DO UPDATE SET
+                payload_json = excluded.payload_json,
+                updated_at = excluded.updated_at,
+                updated_by = excluded.updated_by,
+                reason = excluded.reason,
+                revision = excluded.revision
+            """,
+            (
+                STATE_KEY,
+                json.dumps(candidate, ensure_ascii=False, allow_nan=False),
+                now_iso(),
+                session["email"],
+                reason,
+                next_revision,
+            ),
+        )
+    db_log(
+        session["email"],
+        "state.changed",
+        {
+            "reason": reason,
+            "fromRevision": current_revision,
+            "toRevision": next_revision,
+            "projectCount": len(candidate.get("projects", [])),
+            "taskCount": len(candidate.get("tasks", [])),
+        },
+    )
+    return candidate, next_revision
 
 
 def same_host_origins(host: str) -> set[str]:
@@ -537,29 +988,16 @@ def same_host_origins(host: str) -> set[str]:
     return {f"http://{clean_host}", f"https://{clean_host}"}
 
 
-def allowed_origin(handler: SimpleHTTPRequestHandler) -> str | None:
-    origin = handler.headers.get("Origin")
-    host = handler.headers.get("Host", "")
-    return origin if origin in same_host_origins(host) else None
-
-
-def request_origin_is_allowed(handler: SimpleHTTPRequestHandler) -> bool:
-    origin = handler.headers.get("Origin")
-    if not origin:
+def session_can_access_project(session: dict, project_id: object) -> bool:
+    state = load_app_state()
+    if not state:
         return False
-    return bool(allowed_origin(handler))
-
-
-def csrf_is_valid(handler: SimpleHTTPRequestHandler) -> bool:
-    return False
-
-
-def handler_headers(handler: SimpleHTTPRequestHandler) -> dict[str, str]:
-    return {key: value for key, value in handler.headers.items()}
-
-
-def handler_auth(handler: SimpleHTTPRequestHandler, require_csrf: bool = False, admin: bool = False) -> tuple[dict | None, str | None]:
-    return auth_from_headers(handler_headers(handler), require_csrf=require_csrf, admin=admin)
+    project_key = safe_text(project_id, 120).strip()
+    return project_key in {
+        str(project.get("id"))
+        for project in visible_state(state, session).get("projects", [])
+        if isinstance(project, dict)
+    }
 
 
 def static_file_path(request_path: str) -> Path | None:
@@ -593,196 +1031,43 @@ def static_file_path(request_path: str) -> Path | None:
 class Handler(SimpleHTTPRequestHandler):
     server_version = "ProjeYonetimiLocal/1.0"
 
-    def translate_path(self, path: str) -> str:
-        return str(static_file_path(path) or (ROOT / "index.html"))
+    def _wsgi_environ(self) -> dict:
+        parsed = urlparse(self.path)
+        environ = {
+            "REQUEST_METHOD": self.command,
+            "PATH_INFO": parsed.path or "/",
+            "QUERY_STRING": parsed.query,
+            "HTTP_HOST": self.headers.get("Host", ""),
+            "REMOTE_ADDR": self.client_address[0] if self.client_address else "",
+            "CONTENT_LENGTH": self.headers.get("Content-Length", "0"),
+            "CONTENT_TYPE": self.headers.get("Content-Type", ""),
+            "wsgi.input": self.rfile if self.command in {"POST", "PUT", "PATCH"} else BytesIO(),
+        }
+        for name, value in self.headers.items():
+            key = "HTTP_" + name.upper().replace("-", "_")
+            if key not in {"HTTP_HOST", "HTTP_CONTENT_LENGTH", "HTTP_CONTENT_TYPE"}:
+                environ[key] = value
+        return environ
 
-    def end_headers(self) -> None:
-        origin = allowed_origin(self)
-        if origin:
-            self.send_header("Access-Control-Allow-Origin", origin)
-            self.send_header("Vary", "Origin")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type, X-CSRF-Token")
-        for name, value in SECURITY_HEADERS:
+    def _serve_wsgi(self) -> None:
+        captured: list[tuple[str, list[tuple[str, str]]]] = []
+        body = b"".join(application(self._wsgi_environ(), lambda status, headers, exc_info=None: captured.append((status, headers))))
+        status, headers = captured[0]
+        self.send_response(int(status.split(" ", 1)[0]))
+        for name, value in headers:
             self.send_header(name, value)
-        super().end_headers()
+        self.end_headers()
+        if body:
+            self.wfile.write(body)
 
     def do_OPTIONS(self) -> None:
-        if not is_allowed_host(self.headers.get("Host", "")):
-            json_response(self, {"ok": False, "error": "host-blocked"}, 403)
-            return
-        if not request_origin_is_allowed(self):
-            json_response(self, {"ok": False, "error": "origin-blocked"}, 403)
-            return
-        self.send_response(204)
-        self.end_headers()
+        self._serve_wsgi()
 
     def do_GET(self) -> None:
-        if not is_allowed_host(self.headers.get("Host", "")):
-            json_response(self, {"ok": False, "error": "host-blocked"}, 403)
-            return
-        path = urlparse(self.path).path
-        if path == "/api/health":
-            session, _ = handler_auth(self)
-            json_response(self, {"ok": True, "authenticated": bool(session)})
-            return
-        if path == "/api/state":
-            session, error = handler_auth(self)
-            if error:
-                json_response(self, {"ok": False, "error": error}, 401)
-                return
-            with connect_db() as conn:
-                row = conn.execute("SELECT payload_json, updated_at, updated_by, reason FROM app_state WHERE key = ?", (STATE_KEY,)).fetchone()
-            payload = sanitize_state_payload(json.loads(row[0])) if row else None
-            json_response(self, {"ok": True, "payload": payload, "updatedAt": row[1] if row else None, "updatedBy": row[2] if row else None, "reason": row[3] if row else None})
-            return
-        if path == "/api/logs":
-            session, error = handler_auth(self, admin=True)
-            if error:
-                json_response(self, {"ok": False, "error": error}, 403 if error == "admin-required" else 401)
-                return
-            with connect_db() as conn:
-                rows = conn.execute("SELECT id, ts, actor, action, detail_json FROM logs ORDER BY id DESC LIMIT 100").fetchall()
-            logs = [
-                {"id": row[0], "ts": row[1], "actor": row[2], "action": row[3], "detail": json.loads(row[4] or "{}")}
-                for row in rows
-            ]
-            json_response(self, {"ok": True, "logs": logs})
-            return
-        if path == "/api/snapshots":
-            session, error = handler_auth(self, admin=True)
-            if error:
-                json_response(self, {"ok": False, "error": error}, 403 if error == "admin-required" else 401)
-                return
-            with connect_db() as conn:
-                rows = conn.execute("SELECT id, ts, actor FROM snapshots ORDER BY id DESC LIMIT 50").fetchall()
-            json_response(self, {"ok": True, "snapshots": [{"id": row[0], "ts": row[1], "actor": row[2]} for row in rows]})
-            return
-        if not static_file_path(self.path):
-            json_response(self, {"ok": False, "error": "blocked"}, 403)
-            return
-        return super().do_GET()
+        self._serve_wsgi()
 
     def do_POST(self) -> None:
-        path = urlparse(self.path).path
-        try:
-            if not is_allowed_host(self.headers.get("Host", "")):
-                json_response(self, {"ok": False, "error": "host-blocked"}, 403)
-                return
-            client_ip = client_ip_from_headers({"REMOTE_ADDR": self.client_address[0] if self.client_address else ""})
-            if not rate_limit_key(client_ip, path, RATE_LIMIT_LOGIN if path == "/api/auth/login" else RATE_LIMIT_DEFAULT):
-                json_response(self, {"ok": False, "error": "rate-limit"}, 429)
-                return
-            if not request_origin_is_allowed(self):
-                json_response(self, {"ok": False, "error": "origin-blocked"}, 403)
-                return
-            payload = read_json(self)
-            if path == "/api/auth/login":
-                user = find_auth_user(str(payload.get("email", "")), str(payload.get("password", "")))
-                if not user:
-                    json_response(self, {"ok": False, "error": "auth-required"}, 401)
-                    return
-                result = create_api_session(user)
-                db_log(user["email"], "auth.api.login", {"role": user.get("role", "member")})
-                json_response(self, {"ok": True, **result})
-                return
-            session, error = handler_auth(self, require_csrf=True, admin=path in {"/api/state", "/api/snapshot", "/api/docx/upload"})
-            if error:
-                json_response(self, {"ok": False, "error": error}, 403 if error in {"admin-required", "csrf-token-invalid"} else 401)
-                return
-            if path == "/api/log":
-                db_log(session["email"], payload.get("action", "unknown"), payload.get("detail", {}))
-                json_response(self, {"ok": True})
-                return
-            if path == "/api/state":
-                with connect_db() as conn:
-                    conn.execute(
-                        """
-                        INSERT INTO app_state (key, payload_json, updated_at, updated_by, reason)
-                        VALUES (?, ?, ?, ?, ?)
-                        ON CONFLICT(key) DO UPDATE SET
-                            payload_json = excluded.payload_json,
-                            updated_at = excluded.updated_at,
-                            updated_by = excluded.updated_by,
-                            reason = excluded.reason
-                        """,
-                        (
-                            STATE_KEY,
-                            json.dumps(sanitize_state_payload(payload.get("payload") or {}), ensure_ascii=False),
-                            now_iso(),
-                            session["email"],
-                            payload.get("reason", "manual"),
-                        ),
-                    )
-                db_log(session["email"], "state.saved", {"reason": payload.get("reason", "manual")})
-                json_response(self, {"ok": True})
-                return
-            if path == "/api/snapshot":
-                with connect_db() as conn:
-                    cursor = conn.execute(
-                        "INSERT INTO snapshots (ts, actor, payload_json) VALUES (?, ?, ?)",
-                        (now_iso(), session["email"], json.dumps(sanitize_state_payload(payload.get("payload") or {}), ensure_ascii=False)),
-                    )
-                    snapshot_id = cursor.lastrowid
-                db_log(session["email"], "snapshot.created", {"snapshotId": snapshot_id})
-                json_response(self, {"ok": True, "snapshotId": snapshot_id})
-                return
-            if path == "/api/docx/check":
-                source = template_path(payload.get("templateId"), payload.get("fileName"))
-                ok = bool(source and zipfile.is_zipfile(source))
-                json_response(
-                    self,
-                    {
-                        "ok": ok,
-                        "fileName": source.name if source else payload.get("fileName"),
-                        "sha256": file_sha256(source) if ok and source else "",
-                        "source": "uploaded" if source and source.parent == UPLOAD_DIR else "provided",
-                    },
-                )
-                return
-            if path == "/api/docx/upload":
-                file_name = payload.get("fileName", "")
-                if file_name not in KNOWN_TEMPLATES.values():
-                    json_response(self, {"ok": False, "error": "unknown-template"}, 400)
-                    return
-                try:
-                    data = base64.b64decode(payload.get("dataBase64", ""), validate=True)
-                except (binascii.Error, ValueError):
-                    json_response(self, {"ok": False, "error": "invalid-docx"}, 400)
-                    return
-                valid, validation_error = validate_docx_bytes(data)
-                if not valid:
-                    json_response(self, {"ok": False, "error": validation_error}, 400)
-                    return
-                target = UPLOAD_DIR / file_name
-                target.write_bytes(data)
-                digest = file_sha256(target)
-                with connect_db() as conn:
-                    conn.execute(
-                        "INSERT INTO uploaded_templates (file_name, stored_path, sha256, uploaded_at, uploaded_by) VALUES (?, ?, ?, ?, ?)",
-                        (file_name, str(target), digest, now_iso(), session["email"]),
-                    )
-                db_log(session["email"], "template.uploaded", {"fileName": file_name, "sha256": digest})
-                json_response(self, {"ok": True, "sha256": digest})
-                return
-            if path == "/api/docx/export":
-                data, source_name = filled_docx(payload)
-                db_log(session["email"], "document.exported", {"template": source_name, "project": payload.get("projectName", "")})
-                file_name = f"{payload.get('projectName', 'proje')}-{payload.get('title', 'belge')}.docx"
-                safe_name = safe_download_name(file_name)
-                self.send_response(200)
-                self.send_header("Content-Type", DOCX_MIME)
-                self.send_header("Content-Disposition", f'attachment; filename="{safe_name.encode("ascii", "ignore").decode("ascii") or "belge.docx"}"')
-                self.send_header("Content-Length", str(len(data)))
-                self.end_headers()
-                self.wfile.write(data)
-                return
-            json_response(self, {"ok": False, "error": "not-found"}, 404)
-        except ValueError as exc:
-            json_response(self, {"ok": False, "error": safe_error(str(exc))}, 400)
-        except Exception as exc:  # Keep local server debuggable for the admin screen.
-            db_log("system", "server.error", {"path": path, "type": type(exc).__name__})
-            json_response(self, {"ok": False, "error": "internal-error"}, 500)
+        self._serve_wsgi()
 
 
 def wsgi_status(code: int) -> str:
@@ -790,9 +1075,13 @@ def wsgi_status(code: int) -> str:
         200: "OK",
         204: "No Content",
         400: "Bad Request",
+        401: "Unauthorized",
         403: "Forbidden",
         404: "Not Found",
         405: "Method Not Allowed",
+        409: "Conflict",
+        413: "Payload Too Large",
+        429: "Too Many Requests",
         500: "Internal Server Error",
     }
     return f"{code} {labels.get(code, 'OK')}"
@@ -824,7 +1113,7 @@ def wsgi_headers(environ: dict, content_type: str, length: int | None = None, ex
 
 
 def wsgi_json(environ: dict, start_response, payload: object, status: int = 200):
-    data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    data = json.dumps(payload, ensure_ascii=False, allow_nan=False).encode("utf-8")
     start_response(wsgi_status(status), wsgi_headers(environ, JSON_MIME, len(data)))
     return [data]
 
@@ -837,18 +1126,11 @@ def wsgi_read_json(environ: dict) -> dict:
     raw = environ["wsgi.input"].read(length) if length else b""
     if not raw:
         return {}
-    payload = json.loads(raw.decode("utf-8"))
-    if not isinstance(payload, dict):
-        raise ValueError("json-object-required")
-    return payload
+    return parse_json_object(raw)
 
 
 def wsgi_origin_is_allowed(environ: dict) -> bool:
     return bool(environ.get("HTTP_ORIGIN")) and bool(wsgi_origin(environ))
-
-
-def wsgi_csrf_is_valid(environ: dict) -> bool:
-    return environ.get("HTTP_X_CSRF_TOKEN") == CSRF_TOKEN
 
 
 def ensure_wsgi_ready() -> None:
@@ -892,9 +1174,10 @@ def application(environ, start_response):
                 if error:
                     return wsgi_json(environ, start_response, {"ok": False, "error": error}, 401)
                 with connect_db() as conn:
-                    row = conn.execute("SELECT payload_json, updated_at, updated_by, reason FROM app_state WHERE key = ?", (STATE_KEY,)).fetchone()
+                    row = conn.execute("SELECT payload_json, updated_at, updated_by, reason, revision FROM app_state WHERE key = ?", (STATE_KEY,)).fetchone()
                 payload = sanitize_state_payload(json.loads(row[0])) if row else None
-                return wsgi_json(environ, start_response, {"ok": True, "payload": payload, "updatedAt": row[1] if row else None, "updatedBy": row[2] if row else None, "reason": row[3] if row else None})
+                scoped_payload = visible_state(payload, session) if payload else None
+                return wsgi_json(environ, start_response, {"ok": True, "payload": scoped_payload, "updatedAt": row[1] if row else None, "updatedBy": row[2] if row else None, "reason": row[3] if row else None, "revision": row[4] if row else 0})
             if path == "/api/logs":
                 session, error = auth_from_headers(environ, admin=True)
                 if error:
@@ -913,6 +1196,8 @@ def application(environ, start_response):
                 with connect_db() as conn:
                     rows = conn.execute("SELECT id, ts, actor FROM snapshots ORDER BY id DESC LIMIT 50").fetchall()
                 return wsgi_json(environ, start_response, {"ok": True, "snapshots": [{"id": row[0], "ts": row[1], "actor": row[2]} for row in rows]})
+            if path.startswith("/api/"):
+                return wsgi_json(environ, start_response, {"ok": False, "error": "not-found"}, 404)
             return wsgi_static(environ, start_response, path)
         if method == "POST":
             client_ip = client_ip_from_headers(environ)
@@ -922,40 +1207,30 @@ def application(environ, start_response):
                 return wsgi_json(environ, start_response, {"ok": False, "error": "origin-blocked"}, 403)
             payload = wsgi_read_json(environ)
             if path == "/api/auth/login":
-                user = find_auth_user(str(payload.get("email", "")), str(payload.get("password", "")))
+                if not isinstance(payload.get("email"), str) or not isinstance(payload.get("password"), str) or not payload.get("email") or not payload.get("password"):
+                    return wsgi_json(environ, start_response, {"ok": False, "error": "bad-request"}, 400)
+                if not login_account_rate_limit(payload.get("email", "")):
+                    return wsgi_json(environ, start_response, {"ok": False, "error": "rate-limit"}, 429)
+                user = find_auth_user(payload["email"], payload["password"])
                 if not user:
                     return wsgi_json(environ, start_response, {"ok": False, "error": "auth-required"}, 401)
                 result = create_api_session(user)
                 db_log(user["email"], "auth.api.login", {"role": user.get("role", "member")})
                 return wsgi_json(environ, start_response, {"ok": True, **result})
-            session, error = auth_from_headers(environ, require_csrf=True, admin=path in {"/api/state", "/api/snapshot", "/api/docx/upload"})
+            session, error = auth_from_headers(environ, require_csrf=True, admin=path in {"/api/snapshot", "/api/docx/upload"})
             if error:
                 return wsgi_json(environ, start_response, {"ok": False, "error": error}, 403 if error in {"admin-required", "csrf-token-invalid"} else 401)
+            if path == "/api/auth/logout":
+                revoked = revoke_api_session(environ)
+                if revoked:
+                    db_log(revoked["email"], "auth.api.logout", {})
+                return wsgi_json(environ, start_response, {"ok": True})
             if path == "/api/log":
                 db_log(session["email"], payload.get("action", "unknown"), payload.get("detail", {}))
                 return wsgi_json(environ, start_response, {"ok": True})
             if path == "/api/state":
-                with connect_db() as conn:
-                    conn.execute(
-                        """
-                        INSERT INTO app_state (key, payload_json, updated_at, updated_by, reason)
-                        VALUES (?, ?, ?, ?, ?)
-                        ON CONFLICT(key) DO UPDATE SET
-                            payload_json = excluded.payload_json,
-                            updated_at = excluded.updated_at,
-                            updated_by = excluded.updated_by,
-                            reason = excluded.reason
-                        """,
-                        (
-                            STATE_KEY,
-                            json.dumps(sanitize_state_payload(payload.get("payload") or {}), ensure_ascii=False),
-                            now_iso(),
-                            session["email"],
-                            payload.get("reason", "manual"),
-                        ),
-                    )
-                db_log(session["email"], "state.saved", {"reason": payload.get("reason", "manual")})
-                return wsgi_json(environ, start_response, {"ok": True})
+                _, revision = save_state_update(payload, session)
+                return wsgi_json(environ, start_response, {"ok": True, "revision": revision})
             if path == "/api/snapshot":
                 with connect_db() as conn:
                     cursor = conn.execute(
@@ -967,7 +1242,8 @@ def application(environ, start_response):
                 return wsgi_json(environ, start_response, {"ok": True, "snapshotId": snapshot_id})
             if path == "/api/docx/check":
                 source = template_path(payload.get("templateId"), payload.get("fileName"))
-                ok = bool(source and zipfile.is_zipfile(source))
+                source_data = source.read_bytes() if source and source.is_file() and source.stat().st_size <= MAX_UPLOAD_BYTES else b""
+                ok, _ = validate_docx_bytes(source_data)
                 return wsgi_json(
                     environ,
                     start_response,
@@ -984,7 +1260,7 @@ def application(environ, start_response):
                     return wsgi_json(environ, start_response, {"ok": False, "error": "unknown-template"}, 400)
                 try:
                     data = base64.b64decode(payload.get("dataBase64", ""), validate=True)
-                except (binascii.Error, ValueError):
+                except (binascii.Error, TypeError, ValueError):
                     return wsgi_json(environ, start_response, {"ok": False, "error": "invalid-docx"}, 400)
                 valid, validation_error = validate_docx_bytes(data)
                 if not valid:
@@ -1000,6 +1276,8 @@ def application(environ, start_response):
                 db_log(session["email"], "template.uploaded", {"fileName": file_name, "sha256": digest})
                 return wsgi_json(environ, start_response, {"ok": True, "sha256": digest})
             if path == "/api/docx/export":
+                if not session_can_access_project(session, payload.get("projectId")):
+                    raise DomainError("project-access-denied", 403)
                 data, source_name = filled_docx(payload)
                 db_log(session["email"], "document.exported", {"template": source_name, "project": payload.get("projectName", "")})
                 file_name = f"{payload.get('projectName', 'proje')}-{payload.get('title', 'belge')}.docx"
@@ -1007,12 +1285,31 @@ def application(environ, start_response):
                 headers = [("Content-Disposition", f'attachment; filename="{safe_name.encode("ascii", "ignore").decode("ascii") or "belge.docx"}"')]
                 start_response(wsgi_status(200), wsgi_headers(environ, DOCX_MIME, len(data), headers))
                 return [data]
+            if path == "/api/export/tasks":
+                project_id = safe_text(payload.get("projectId"), 120)
+                export_format = safe_text(payload.get("format", "csv"), 10).casefold()
+                scoped = visible_state(load_app_state() or {}, session)
+                if project_id not in {str(project.get("id")) for project in scoped.get("projects", [])}:
+                    raise DomainError("project-access-denied", 403)
+                tasks = [task for task in scoped.get("tasks", []) if str(task.get("projectId")) == project_id]
+                if export_format == "csv":
+                    data, content_type, extension = export_tasks_csv(tasks), "text/csv; charset=utf-8", "csv"
+                elif export_format == "pdf":
+                    data, content_type, extension = export_tasks_pdf(tasks), "application/pdf", "pdf"
+                else:
+                    raise DomainError("bad-request")
+                name = safe_download_name(f"{project_id}-tasks.docx").removesuffix(".docx")
+                headers = [("Content-Disposition", f'attachment; filename="{name}.{extension}"')]
+                start_response(wsgi_status(200), wsgi_headers(environ, content_type, len(data), headers))
+                return [data]
             return wsgi_json(environ, start_response, {"ok": False, "error": "not-found"}, 404)
         return wsgi_json(environ, start_response, {"ok": False, "error": "method-not-allowed"}, 405)
+    except DomainError as exc:
+        return wsgi_json(environ, start_response, {"ok": False, "error": safe_error(exc.code)}, exc.status)
     except ValueError as exc:
         return wsgi_json(environ, start_response, {"ok": False, "error": safe_error(str(exc))}, 400)
     except Exception as exc:
-        db_log("system", "server.error", {"path": path, "type": type(exc).__name__})
+        record_internal_error(path, exc)
         return wsgi_json(environ, start_response, {"ok": False, "error": "internal-error"}, 500)
 
 
