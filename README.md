@@ -148,3 +148,86 @@ değişiklikleri entegrasyon koduyla gereksiz yere birleştirilmemelidir.
 ## Lisans
 
 Bu proje [MIT Lisansı](LICENSE) ile yayımlanır.
+
+## English
+
+### Project Management
+
+A SQLite-backed web application for managing team projects, tasks, submissions,
+calendars and student documents from one workspace. It runs through the Python
+standard library WSGI interface and can be deployed on PythonAnywhere without
+an external backend package.
+
+> [!NOTE]
+> Demo passwords are not stored in plaintext in the source or SQLite state.
+> They use PBKDF2-HMAC-SHA256 test credentials. Change demo passwords before production use.
+
+#### Features
+
+- Email sign-in, registration and project selection after login
+- System admin, project admin, team lead and member permissions
+- Project membership, task assignment, checklists, comments and submissions
+- Task approval, change requests, calendar, CRM, team feed and reports
+- Ten Word templates that can be completed in the browser and downloaded as `.docx`
+- Workshop inventory and user-specific requests inside a project
+- SQLite state, revision control, snapshots, audit logs and notification outbox
+- Project-scoped authorization, CSRF, origin/host and rate-limit controls
+- Optimistic concurrency, soft delete, trash recovery and data-integrity rules
+- CSV and PDF task exports
+
+#### Quick Start
+
+Python 3.10 or newer is required. Python 3.12 is recommended.
+
+```powershell
+git clone https://github.com/Alibehram11/Project_Management.git
+cd Project_Management
+python server.py --check
+python endpoint_quality_tests.py
+python server.py
+```
+
+Open `http://127.0.0.1:8765` in a browser. The main application uses only the
+Python standard library, so the root `requirements.txt` is intentionally empty.
+
+#### Demo Accounts
+
+Every demo account uses the password `123456`.
+
+| Role | Email |
+| --- | --- |
+| System admin | `admin@proje.local` |
+| Software lead | `yazilim@proje.local` |
+| Software member | `yazilim2@proje.local` |
+| Design member | `tasarim@proje.local` |
+| Mechanics lead | `mekanik@proje.local` |
+| Electronics member | `elektronik@proje.local` |
+| Mentor admin | `mentor@proje.local` |
+| Workshop admin | `atolye@proje.local` |
+
+#### Validation
+
+```powershell
+python security_tests.py
+python advanced_tests.py
+python security_advanced_tests.py
+python endpoint_quality_tests.py
+python server.py --check
+python -m py_compile server.py advanced_rules.py security_tests.py advanced_tests.py security_advanced_tests.py endpoint_quality_tests.py wsgi.py
+```
+
+Expected results are `55/55`, `32/32`, `29/29`, `45 PASS / 0 FAIL / 18 NOT_APPLICABLE`,
+and `10/10` Word templates respectively.
+
+#### Security
+
+The application uses bearer sessions, per-session CSRF tokens, current project
+membership checks, IDOR-resistant state filtering, revision conflicts, bounded
+JSON input, validated DOCX packages, parameterized SQL, rate limiting and a
+retryable SQLite outbox. See [SECURITY.md](SECURITY.md) for vulnerability reports.
+
+#### Deployment and Contributions
+
+See [PYTHONANYWHERE.md](PYTHONANYWHERE.md) for manual WSGI deployment and
+[CONTRIBUTING.md](CONTRIBUTING.md) for development checks and pull request rules.
+The project is released under the [MIT License](LICENSE).

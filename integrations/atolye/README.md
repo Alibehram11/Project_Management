@@ -121,3 +121,58 @@ The admin password is not stored in the repository. Set `ATOLYE_ADMIN_PASSWORD` 
 ## Status
 
 Working local prototype for robotics workshop inventory and request tracking. The next portfolio step is to add screenshots, tests, and a small release note.
+
+## Türkçe
+
+### Robotik Atölyesi Envanter Yönetim Sistemi
+
+Robotik atölyesi için Flask tabanlı envanter ve talep takip uygulamasıdır.
+
+#### Problem
+
+Atölyelerde Arduino kartları, sensörler, motorlar, kablolar ve araçlar birçok
+öğrenci projesi arasında paylaşılır. Basit bir talep ve onay akışı olmadan
+malzemeler kaybolabilir, gereğinden fazla istenebilir veya elle takip edilebilir.
+
+#### Çözüm
+
+- Öğrenciler ürünleri arayıp parçaları sepete ekleyebilir.
+- Taleplerde öğrenci ve proje bilgileri tutulur.
+- Admin kullanıcıları talepleri onaylayabilir veya reddedebilir.
+- Onaylanan talepler stok miktarını azaltır.
+- Envanter Excel’den içe aktarılabilir.
+- Admin parolası ve Flask secret key ortam değişkenlerinden okunur.
+
+#### Teknoloji
+
+- Python, Flask, Flask-SQLAlchemy ve SQLite
+- Excel aktarımı için pandas / openpyxl
+- Yerel yapılandırma için python-dotenv
+
+#### Kurulum ve çalıştırma
+
+Python 3.8 veya üzerini kullanın:
+
+```powershell
+pip install -r requirements.txt
+copy .env.example .env
+python app.py
+```
+
+`.env` içinde `ATOLYE_SECRET_KEY`, `ATOLYE_ADMIN_PASSWORD` ve
+`ATOLYE_DEBUG=false` değerlerini ayarlayın. Uygulama `http://localhost:5000`
+adresinde, admin paneli ise `/admin` yolunda açılır.
+
+#### Doğrulama
+
+- Uygulamayı çalıştırıp ürünlerin göründüğünü kontrol edin.
+- Sepet akışından test talebi gönderin.
+- `/admin` üzerinden talebi onaylayın.
+- Stok miktarının azaldığını doğrulayın.
+
+#### Güvenlik ve durum
+
+Varsayılan admin parolası repoda tutulmaz. `.env` dosyasını Git’e eklemeyin ve
+paylaşılan ağlarda `ATOLYE_DEBUG=false` kullanın. Bu entegrasyon robotik atölye
+envanteri için çalışan yerel prototiptir; sonraki adımlar ekran görüntüleri,
+temel testler ve kısa bir sürüm notudur.
